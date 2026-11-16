@@ -21,6 +21,7 @@ htmlcov/
 dist/
 build/
 audit/
+.r1-verification/
 
 # Editors and OS files
 .idea/

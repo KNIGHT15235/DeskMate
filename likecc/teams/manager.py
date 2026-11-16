@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -30,7 +31,9 @@ class TeamError(Exception):
 
 
 class TeamManager:
-    def __init__(self, worktree_manager: Any = None, trace_manager: Any = None) -> None:
+    def __init__(self, worktree_manager: Any = None, trace_manager: Any = None,
+                 name_registry: AgentNameRegistry | None = None) -> None:
+        self.name_registry = name_registry if name_registry is not None else AgentNameRegistry.instance()
         self._teams: dict[str, AgentTeam] = {}
         self._task_stores: dict[str, SharedTaskStore] = {}
         self._mailboxes: dict[str, Mailbox] = {}
@@ -132,7 +135,7 @@ class TeamManager:
         team.add_member(member)
         team.save()
 
-        AgentNameRegistry.instance().register(member.name, member.agent_id)
+        self.name_registry.register(member.name, member.agent_id)
         self._teammate_team_map[member.agent_id] = team_name
         log.info("Registered member '%s' (agent=%s) in team '%s'", member.name, member.agent_id, team_name)
 
@@ -175,7 +178,7 @@ class TeamManager:
             raise TeamError(f"Cannot delete team: active members: {names}")
 
         for member in list(team.members):
-            AgentNameRegistry.instance().unregister(member.name)
+            self.name_registry.unregister(member.name)
 
             handle = self._inprocess_handles.pop(member.agent_id, None)
             if handle and not handle.done:
@@ -212,6 +215,27 @@ class TeamManager:
                 if m.agent_id == agent_id:
                     return name
         return None
+
+    async def shutdown(self, *, delete_teams: bool = False) -> None:
+        """Reap in-process teammates before releasing runtime clients.
+
+        The headless adapter retains its existing on-disk team metadata. The
+        interactive adapter also performs its historical team deletion.
+        """
+        handles = list(self._inprocess_handles.values())
+        for handle in handles:
+            handle.cancel()
+        if handles:
+            await asyncio.gather(*(handle.task for handle in handles), return_exceptions=True)
+        self._inprocess_handles.clear()
+        if delete_teams:
+            for name, team in list(self._teams.items()):
+                try:
+                    for member in team.members:
+                        team.set_member_active(member.name, False)
+                    self.delete_team(name)
+                except Exception:
+                    log.exception("Failed to delete team %s during shutdown", name)
 
 
     def drain_lead_mailbox(self) -> list[str]:

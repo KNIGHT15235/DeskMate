@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -59,10 +58,12 @@ def main() -> None:
 
     hook_engine = HookEngine(hooks) if hooks else None
 
+    work_dir = str(Path.cwd().resolve())
+
     if args.p is not None:
         asyncio.run(
             _run_prompt_with_hook_cleanup(
-                config, permission_mode, hook_engine, args.p
+                config, permission_mode, hook_engine, args.p, work_dir=work_dir
             )
         )
         return
@@ -71,6 +72,7 @@ def main() -> None:
     from likecc.driver import NoAltScreenDriver
 
     app = LikeCCApp(
+        work_dir=work_dir,
         providers=config.providers,
         permission_mode=permission_mode,
         mcp_servers=config.mcp_servers,
@@ -85,13 +87,13 @@ def main() -> None:
     app.run()
 
 
-async def _shutdown_hook_engine(hook_engine: HookEngine | None) -> None:
+async def _shutdown_hook_engine(hook_engine: HookEngine | None, work_dir: str) -> None:
     if hook_engine is None:
         return
 
     async def _run_shutdown_hooks() -> None:
         await hook_engine.run_hooks(
-            "shutdown", HookContext(event_name="shutdown", work_dir=os.getcwd())
+            "shutdown", HookContext(event_name="shutdown", work_dir=work_dir)
         )
         await hook_engine.wait_for_background_hooks()
 
@@ -106,131 +108,50 @@ async def _shutdown_hook_engine(hook_engine: HookEngine | None) -> None:
 
 
 async def _run_prompt_with_hook_cleanup(
-    config, permission_mode, hook_engine: HookEngine | None, prompt: str
+    config, permission_mode, hook_engine: HookEngine | None, prompt: str,
+    *, work_dir: str | None = None,
 ) -> None:
+    work_dir = str(Path(work_dir or Path.cwd()).resolve())
     try:
         if hook_engine is not None:
             await hook_engine.run_hooks(
-                "startup", HookContext(event_name="startup", work_dir=os.getcwd())
+                "startup", HookContext(event_name="startup", work_dir=work_dir)
             )
-        await _run_prompt(config, permission_mode, hook_engine, prompt)
+        await _run_prompt(config, permission_mode, hook_engine, prompt, work_dir=work_dir)
     finally:
-        await _shutdown_hook_engine(hook_engine)
+        from likecc.runtime import finish_cleanup
+        await finish_cleanup(asyncio.create_task(_shutdown_hook_engine(hook_engine, work_dir)))
 
 
-async def _run_prompt(config, permission_mode, hook_engine, prompt: str) -> None:
-    from likecc.agent import Agent
-    from likecc.client import create_client, resolve_context_window
+async def _run_prompt(config, permission_mode, hook_engine, prompt: str,
+                      *, work_dir: str | None = None) -> None:
     from likecc.conversation import ConversationManager
-    from likecc.memory.instructions import load_instructions
-    from likecc.permissions import (
-        DangerousCommandDetector,
-        PathSandbox,
-        PermissionChecker,
-        RuleEngine,
+    from likecc.runtime import Runtime
+
+    runtime = Runtime(
+        config=config, work_dir=work_dir or Path.cwd(),
+        permission_mode=permission_mode, hook_engine=hook_engine,
     )
-    from likecc.tools import create_default_registry
-    from likecc.agents.loader import AgentLoader
-    from likecc.agents.task_manager import TaskManager
-    from likecc.agents.trace import TraceManager
-    from likecc.tools.agent_tool import AgentTool
-    from likecc.tools.enter_worktree import EnterWorktreeTool
-    from likecc.tools.exit_worktree import ExitWorktreeTool
-    from likecc.tools.impl.tool_search import ToolSearchTool
-    from likecc.teams.manager import TeamManager
-    from likecc.tools.team_create import TeamCreateTool
-    from likecc.tools.team_delete import TeamDeleteTool
-    from likecc.worktree import WorktreeManager
-    from likecc.config import WorktreeConfig
-
-    provider = config.providers[0]
-    client = create_client(provider)
-    # 第 2 层：尽力从 provider 自动拉取模型的 context window（缓存在 provider 上）。
-    # 不会抛异常或阻塞启动；失败则退化到映射表。
-    await resolve_context_window(provider)
-    work_dir = os.getcwd()
-    home = Path.home()
-
-    checker = PermissionChecker(
-        detector=DangerousCommandDetector(),
-        sandbox=PathSandbox(work_dir),
-        rule_engine=RuleEngine(
-            user_rules_path=home / ".likecc" / "permissions.yaml",
-            project_rules_path=Path(work_dir) / ".likecc" / "permissions.yaml",
-            local_rules_path=Path(work_dir) / ".likecc" / "permissions.local.yaml",
-        ),
-        mode=permission_mode,
-    )
-
-    instructions = load_instructions(work_dir)
-    registry = create_default_registry()
-    registry.register(ToolSearchTool(registry, protocol=provider.protocol))
-
-    agent = Agent(
-        client=client,
-        registry=registry,
-        protocol=provider.protocol,
-        work_dir=work_dir,
-        permission_checker=checker,
-        context_window=provider.get_context_window(),
-        instructions_content=instructions,
-        hook_engine=hook_engine,
-    )
-
-    def sync_worktree_context(path: str) -> None:
-        registry.clear_file_caches()
-        agent.work_dir = path
-        checker.sandbox.set_project_root(path)
-
-    wt_cfg = config.worktree or WorktreeConfig()
-    wt_manager = WorktreeManager(
-        repo_root=work_dir,
-        symlink_directories=wt_cfg.symlink_directories,
-        on_work_dir_change=sync_worktree_context,
-    )
-    wt_manager.restore_session()
-    registry.register(EnterWorktreeTool(worktree_manager=wt_manager))
-    registry.register(ExitWorktreeTool(worktree_manager=wt_manager))
-    trace_manager = TraceManager()
-    task_manager = TaskManager()
-    agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
-    agent_loader.load_all()
-    team_manager = TeamManager(worktree_manager=wt_manager, trace_manager=trace_manager)
-
-    agent_tool = AgentTool(
-        agent_loader=agent_loader,
-        task_manager=task_manager,
-        trace_manager=trace_manager,
-        parent_agent=agent,
-        enable_fork=config.enable_fork,
-        provider_config=provider,
-        worktree_manager=wt_manager,
-        team_manager=team_manager,
-    )
-    registry.register(agent_tool)
-    registry.register(TeamCreateTool(
-        team_manager=team_manager,
-        parent_agent=agent,
-        teammate_mode="in-process",
-        is_interactive=False,
-        enable_coordinator_mode=config.enable_coordinator_mode,
-    ))
-    registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
-
-    def drain_notifications() -> list[str]:
-        notes: list[str] = []
-        for t in task_manager.poll_completed():
-            notes.append(
-                f"<task-notification>\n<task_id>{t.id}</task_id>\n"
-                f"<status>{t.status}</status>\n<result>{t.result}</result>\n"
-                f"</task-notification>"
-            )
-        notes.extend(team_manager.drain_lead_mailbox())
-        return notes
-
-    agent.notification_fn = drain_notifications
-
     try:
+        await runtime.initialize(config.providers[0], resolve_context=True)
+        runtime.assemble_delegation(interactive=False)
+        agent = runtime.agent
+        task_manager = runtime.task_manager
+        team_manager = runtime.team_manager
+
+        def drain_notifications() -> list[str]:
+            notes: list[str] = []
+            for t in task_manager.poll_completed():
+                notes.append(
+                    f"<task-notification>\n<task_id>{t.id}</task_id>\n"
+                    f"<status>{t.status}</status>\n<result>{t.result}</result>\n"
+                    f"</task-notification>"
+                )
+            notes.extend(team_manager.drain_lead_mailbox())
+            return notes
+
+        agent.notification_fn = drain_notifications
+
         conv = ConversationManager()
         last_result = await agent.run_to_completion(prompt, conv)
         print(last_result, flush=True)
@@ -262,25 +183,9 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str) -> None
                     timeout=HEADLESS_NOTIFICATION_INTERVAL,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+
     finally:
-        # Keep cancellation and exception paths in this event loop so a CLI
-        # return cannot leave workers running or lose their finalizers.
-        pending = list(task_manager._async_tasks.items())
-        for _, task in pending:
-            if not task.done():
-                task.cancel()
-        if pending:
-            await asyncio.gather(*(task for _, task in pending), return_exceptions=True)
-        for task_id, task in pending:
-            # A task cancelled before its first scheduling never enters the
-            # worker's try/finally, so finish that bookkeeping here.
-            if task.cancelled() and task_id in task_manager._async_tasks:
-                task_manager._async_tasks.pop(task_id, None)
-                background = task_manager.get(task_id)
-                if background is not None:
-                    background.status = "cancelled"
-                    background.result = "Task was cancelled"
-                    background.end_time = asyncio.get_running_loop().time()
+        await runtime.aclose()
 
 
 if __name__ == "__main__":

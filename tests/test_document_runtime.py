@@ -190,7 +190,7 @@ async def test_textual_input_help_and_cancellation(tmp_path, monkeypatch):
             yield TextDelta("ui-response")
             yield StreamEnd("end_turn", input_tokens=2, output_tokens=2)
 
-    monkeypatch.setattr(ui, "create_client", lambda _: UIClient())
+    monkeypatch.setattr("likecc.client.create_client", lambda _: UIClient())
 
     async def resolve(_):
         return 32000

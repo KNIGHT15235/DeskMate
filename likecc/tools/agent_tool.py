@@ -108,6 +108,20 @@ class AgentTool(Tool):
         self._provider_config = provider_config
         self._worktree_manager = worktree_manager
         self._team_manager = team_manager
+        self._owned_clients: list[LLMClient] = []
+        self._child_tools: list[AgentTool] = []
+
+    async def aclose(self) -> None:
+        """Close model-override clients after all children have been reaped."""
+        children, self._child_tools = self._child_tools, []
+        for child_tool in children:
+            await child_tool.aclose()
+        clients, self._owned_clients = self._owned_clients, []
+        for client in clients:
+            try:
+                await client.aclose()
+            except Exception:
+                log.exception("Failed to close sub-agent model client")
 
     async def execute(self, params: BaseModel) -> ToolResult:
         p: AgentToolParams = params  # type: ignore[assignment]
@@ -348,15 +362,19 @@ class AgentTool(Tool):
         child.replacement_state = clone_replacement_state(self._parent_agent.replacement_state)
 
     def _bind_child_tools(self, child: Agent) -> None:
+        child.session_dir = child.session_dir / child.agent_id
+        child.session_dir.mkdir(parents=True, exist_ok=True)
         load_skill = child.registry.get("LoadSkill")
         if load_skill is not None and hasattr(load_skill, "set_agent"):
             load_skill.set_agent(child)
         if child.registry.get("Agent") is not None:
-            child.registry.register(AgentTool(
+            child_tool = AgentTool(
                 self._agent_loader, self._task_manager, self._trace_manager, child,
                 enable_fork=self._enable_fork, provider_config=self._provider_config,
                 worktree_manager=self._worktree_manager, team_manager=self._team_manager,
-            ))
+            )
+            self._child_tools.append(child_tool)
+            child.registry.register(child_tool)
 
     def _validate_plan_subagent(self, params: AgentToolParams) -> ToolResult | None:
         if self._parent_agent.permission_mode != PermissionMode.PLAN:
@@ -403,7 +421,6 @@ class AgentTool(Tool):
             RuleEngine,
         )
         from likecc.teams.models import BackendType, TeammateInfo
-        from likecc.teams.registry import AgentNameRegistry
 
         team = self._team_manager.get_team(p.team_name)
         if team is None:
@@ -532,7 +549,7 @@ class AgentTool(Tool):
         self._bind_child_tools(sub_agent)
 
         # 7. 注册名称和成员信息
-        AgentNameRegistry.instance().register(teammate_name, agent_id)
+        self._team_manager.name_registry.register(teammate_name, agent_id)
 
         member = TeammateInfo(
             name=teammate_name,
@@ -676,6 +693,8 @@ class AgentTool(Tool):
             context_window=self._provider_config.context_window,
         )
         try:
-            return create_client(config)
+            client = create_client(config)
+            self._owned_clients.append(client)
+            return client
         except Exception:
             return None

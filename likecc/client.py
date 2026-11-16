@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
@@ -121,6 +122,12 @@ class LLMClient(ABC):
 
     def set_max_output_tokens(self, tokens: int) -> None:
         pass
+
+    async def aclose(self) -> None:
+        """Release this client's SDK transport; fake clients need no transport."""
+        transport = getattr(self, "_client", None)
+        if transport is not None:
+            await transport.close()
 
 
 def _supports_adaptive_thinking(model: str) -> bool:
@@ -615,13 +622,16 @@ async def resolve_context_window(config: ProviderConfig) -> None:
         client = create_client(config)
     except Exception:
         return
-    fetch = getattr(client, "fetch_model_context_window", None)
-    if fetch is None:
-        return
-
     try:
-        window = await fetch()
+        fetch = getattr(client, "fetch_model_context_window", None)
+        if fetch is not None:
+            window = await fetch()
+            if window:
+                config.set_fetched_context_window(window)
     except Exception:
-        window = None
-    if window:
-        config.set_fetched_context_window(window)
+        pass
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to close model metadata client")

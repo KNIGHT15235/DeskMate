@@ -1,6 +1,8 @@
 # LikeCC
 
-一个学习 Claude Code 工作方式的 Python 终端编程助手实验项目，也是 **EviForge 的早期功能基线**。它围绕代码阅读、工具执行、上下文管理和子 Agent 分工，探索终端 Coding Agent 的实现方式。
+一个学习 Claude Code 工作方式的 Python 终端编程助手实验项目。当前开发副本以 LikeCC 0.2.0 为基线，逐步演进为 **DeskMate（桌伴）**：具备个人事务执行、个人记忆、后台调度和主动提醒能力的桌面助手。
+
+本轮 R1 已提取独立于 Textual 的共享运行时装配并明确资源生命周期；桌面界面及上述个人助手能力仍是后续计划。Python 包、CLI 和 `.likecc` 数据路径保持现有名称。进度和学习入口见 [DeskMate 路线图](docs/deskmate-roadmap.md) 与 [R1 学习记录](docs/deskmate-learning.md)。
 
 本项目为独立学习实践，与 Anthropic 无官方关联，也不声称复现 Claude Code 的完整内部实现。
 
@@ -73,6 +75,7 @@ uv run --locked likecc --mode plan
 likecc/
   agent.py          Agent 运行循环
   client.py         模型协议适配
+  runtime.py        共享装配、实例隔离与资源生命周期
   tools/            文件、命令与协作工具
   agents/           子 Agent 定义、Fork 与后台任务
   permissions/      权限模式、规则与路径检查
@@ -90,12 +93,12 @@ docs/               验证说明
 
 ## 验证与边界
 
-LikeCC 在 Python 3.11 和 3.12 下均通过 **720 项 pytest 测试**，另通过 **90 项独立 SubAgent 检查**。完整范围与复现命令见 [验证说明](docs/verification.md)。
+LikeCC 0.2.0 在 2026-09-22 的发布验证为 Python 3.11 和 3.12 各 **720 项 pytest 测试**、**90 项独立 SubAgent 检查**。DeskMate R1 的本次实测环境、命令、结果另行记录在 [验证说明](docs/verification.md)，不复用历史通过数量。
 
 - 已验证用例以本地 fake 模型、临时文件和临时 Git 仓库为主，不代表真实模型服务、所有操作系统或外部 MCP 服务都已验证。
 - TUI 与 `-p` 共用核心 Agent 能力；`-p` 尚未装配 TUI 的 Memory、Session、Skill 与 MCP 全套管理器。
 - Hook 的 `agent` 执行器、插件来源的 Agent 加载尚未实现。
-- EviForge 后续版本规划的证据验收、持久化恢复和经验治理不属于本初版已实现的能力。
+- DeskMate 的统一执行与会话服务、桌面入口、个人事务、调度、个人记忆和主动通知尚未实现，按 R2–R8 逐步推进。
 - Fork 保留可复用的请求前缀；实际缓存命中取决于服务端、模型和请求内容，不承诺固定命中率。
 - 子 Agent 的报告格式由提示词约束；Worktree 提供工作目录隔离，权限检查不等同于操作系统级安全沙箱。
 - 本仓库公开版本仅包含源码、测试与示例，不包含开发阶段的审计备份、运行日志或个人配置。

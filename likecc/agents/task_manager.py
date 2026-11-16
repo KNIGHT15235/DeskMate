@@ -42,6 +42,7 @@ class TaskManager:
         self._tasks: dict[str, BackgroundTask] = {}
         self._notify_queue: asyncio.Queue[str] = asyncio.Queue()
         self._async_tasks: dict[str, asyncio.Task[None]] = {}
+        self._closed = False
 
 
     def launch(
@@ -51,6 +52,8 @@ class TaskManager:
         name: str = "",
         fork_conversation: Any = None,
     ) -> str:
+        if self._closed:
+            raise RuntimeError("TaskManager is closed")
         task_id = uuid.uuid4().hex[:8]
         bg = BackgroundTask(
             id=task_id,
@@ -136,6 +139,8 @@ class TaskManager:
         partial_result: str = "",
         name: str = "",
     ) -> str:
+        if self._closed:
+            raise RuntimeError("TaskManager is closed")
         task_id = uuid.uuid4().hex[:8]
         bg = BackgroundTask(
             id=task_id,
@@ -176,6 +181,24 @@ class TaskManager:
 
     def get(self, task_id: str) -> BackgroundTask | None:
         return self._tasks.get(task_id)
+
+    async def shutdown(self) -> None:
+        """Cancel and reap workers, including those not scheduled even once."""
+        self._closed = True
+        pending = list(self._async_tasks.items())
+        for _, task in pending:
+            if not task.done():
+                task.cancel()
+        if pending:
+            await asyncio.gather(*(task for _, task in pending), return_exceptions=True)
+        for task_id, task in pending:
+            if task.cancelled() and task_id in self._async_tasks:
+                self._async_tasks.pop(task_id, None)
+                background = self.get(task_id)
+                if background is not None:
+                    background.status = "cancelled"
+                    background.result = "Task was cancelled"
+                    background.end_time = time.monotonic()
 
     def list_tasks(self) -> list[BackgroundTask]:
         return list(self._tasks.values())

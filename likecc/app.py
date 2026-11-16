@@ -45,8 +45,9 @@ from likecc.commands import (
 )
 from likecc.commands.completion import CompletionPopup
 from likecc.commands.handlers import register_all_commands
-from likecc.config import MCPServerConfig, ProviderConfig
-from likecc.hooks import HookContext, HookEngine, load_hooks
+from likecc.config import AppConfig, MCPServerConfig, ProviderConfig, WorktreeConfig
+from likecc.runtime import Runtime, finish_cleanup
+from likecc.hooks import HookContext, HookEngine
 from likecc.conversation import ConversationManager, Message
 from likecc.mcp import MCPManager
 from likecc.memory import (
@@ -55,17 +56,10 @@ from likecc.memory import (
     SessionManager,
     find_relevant_memories,
     generate_session_summary,
-    load_instructions,
     make_compact_boundary,
     render_reminder,
 )
-from likecc.permissions import (
-    DangerousCommandDetector,
-    PathSandbox,
-    PermissionChecker,
-    PermissionMode,
-    RuleEngine,
-)
+from likecc.permissions import PermissionMode
 from likecc.agents.loader import AgentLoader
 from likecc.agents.task_manager import TaskManager
 from likecc.agents.trace import TraceManager
@@ -76,11 +70,8 @@ from likecc.skills.loader import SkillLoader
 from likecc.commands.handlers.skill_register import register_skill_commands
 from rich.text import Text as RichText
 from textual.theme import Theme
-from likecc.cache import FileCache
-from likecc.tools import ToolRegistry, create_default_registry
-from likecc.tools.agent_tool import AgentTool
+from likecc.tools import ToolRegistry
 from likecc.tools.ask_user import AskUserEvent, AskUserTool
-from likecc.tools.impl.tool_search import ToolSearchTool
 from likecc.tools.load_skill import LoadSkill
 from likecc.worktree.cleanup import start_stale_cleanup_task
 from likecc.worktree.manager import WorktreeManager
@@ -576,6 +567,7 @@ class LikeCCApp(App):
         teammate_mode: str = "",
         enable_coordinator_mode: bool = False,
         driver_class: type | None = None,
+        work_dir: str | Path | None = None,
     ) -> None:
         super().__init__(driver_class=driver_class)
         self.providers = providers
@@ -587,10 +579,18 @@ class LikeCCApp(App):
         self._worktree_config = worktree_config
         self._teammate_mode = teammate_mode
         self._enable_coordinator_mode = enable_coordinator_mode
-        self.file_cache = FileCache()
+        self._work_dir = str(Path(work_dir or Path.cwd()).resolve())
+        self._runtime_config = AppConfig(
+            providers=providers, permission_mode=permission_mode.value,
+            enable_fork=enable_fork, enable_verification_agent=enable_verification_agent,
+            worktree=worktree_config or WorktreeConfig(), teammate_mode=teammate_mode,
+            enable_coordinator_mode=enable_coordinator_mode,
+        )
+        self.runtime = self._new_runtime()
+        self.file_cache = self.runtime.file_cache
         self.client: LLMClient | None = None
         self.conversation = ConversationManager()
-        self.registry: ToolRegistry = create_default_registry(file_cache=self.file_cache)
+        self.registry: ToolRegistry = self.runtime.registry
         self.agent: Agent | None = None
         self.mcp_manager: MCPManager | None = None
         self._mcp_init_task: asyncio.Task[None] | None = None
@@ -615,8 +615,8 @@ class LikeCCApp(App):
         self.skill_executor: SkillExecutor | None = None
         self._load_skill_tool: LoadSkill | None = None
         self.agent_loader: AgentLoader | None = None
-        self.task_manager: TaskManager = TaskManager()
-        self.trace_manager: TraceManager = TraceManager()
+        self.task_manager: TaskManager = self.runtime.task_manager
+        self.trace_manager: TraceManager = self.runtime.trace_manager
         self._notification_check_task: asyncio.Task[None] | None = None
         self.worktree_manager: WorktreeManager | None = None
         self._stale_cleanup_task: asyncio.Task[None] | None = None
@@ -633,6 +633,25 @@ class LikeCCApp(App):
         self._hooks_closed = False
         self._hook_shutdown_lock = asyncio.Lock()
         self._force_exit_requested = False
+        self._close_task: asyncio.Task | None = None
+        self._context_window_task: asyncio.Task | None = None
+        self._entry_tasks: set[asyncio.Task] = set()
+        self._closing = False
+        self._mcp_ready = asyncio.Event()
+        self._mcp_stop = asyncio.Event()
+
+    def _new_runtime(self) -> Runtime:
+        return Runtime(
+            config=self._runtime_config, work_dir=self._work_dir,
+            permission_mode=self._initial_permission_mode,
+            hook_engine=self.hook_engine, cache_files=True,
+        )
+
+    def _spawn_task(self, coro, *, name: str | None = None) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=name)
+        self._entry_tasks.add(task)
+        task.add_done_callback(self._entry_tasks.discard)
+        return task
 
     @staticmethod
     def _make_banner(model: str = "", work_dir: str = "") -> RichText:
@@ -680,37 +699,45 @@ class LikeCCApp(App):
                 yield Static("", id="model-label")
             yield CompletionPopup()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self.register_theme(_LIKECC_THEME)
         self.theme = "likecc"
         if len(self.providers) == 1:
-            self._select_provider(self.providers[0])
+            await self._select_provider(self.providers[0])
         else:
             self.query_one("#chat-area").display = False
             self.query_one("#input-area").display = False
 
-    def _select_provider(self, provider: ProviderConfig) -> None:
-        self._selected_provider = provider
+    async def _select_provider(self, provider: ProviderConfig) -> None:
+        if self.agent is not None:
+            return
+        if self.runtime.closed:
+            self.runtime = self._new_runtime()
+            self.registry = self.runtime.registry
+            self.file_cache = self.runtime.file_cache
+            self.task_manager = self.runtime.task_manager
+            self.trace_manager = self.runtime.trace_manager
+        # Preserve TUI schema order: LoadSkill precedes ToolSearch.
+        self._load_skill_tool = LoadSkill()
+        self.registry.register(self._load_skill_tool)
         try:
-            self.client = create_client(provider)
+            await self.runtime.initialize(provider)
         except AuthenticationError as e:
             self._show_error(str(e))
             return
+        try:
+            self._configure_interactive_runtime()
+        except BaseException:
+            await self._close_resources(run_shutdown_hook=False)
+            raise
 
-        work_dir = os.getcwd()
-        home = Path.home()
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(work_dir),
-            rule_engine=RuleEngine(
-                user_rules_path=home / ".likecc" / "permissions.yaml",
-                project_rules_path=Path(work_dir) / ".likecc" / "permissions.yaml",
-                local_rules_path=Path(work_dir) / ".likecc" / "permissions.local.yaml",
-            ),
-            mode=self._initial_permission_mode,
-        )
-
-        self._instructions_content = load_instructions(work_dir)
+    def _configure_interactive_runtime(self) -> None:
+        provider = self.runtime.provider
+        self._selected_provider = provider
+        self.client = self.runtime.client
+        self.agent = self.runtime.agent
+        work_dir = self._work_dir
+        self._instructions_content = self.agent.instructions_content
         self.memory_manager = MemoryManager(work_dir)
         self.session_manager = SessionManager(work_dir)
         self.session_manager.cleanup()
@@ -722,30 +749,15 @@ class LikeCCApp(App):
             if hasattr(tool, "file_history"):
                 tool.file_history = self.file_history
 
-        load_skill_tool = LoadSkill()
-        self.registry.register(load_skill_tool)
-        self._load_skill_tool = load_skill_tool
+        load_skill_tool = self._load_skill_tool
 
-        self.registry.register(
-            ToolSearchTool(self.registry, protocol=provider.protocol)
-        )
         self.registry.register(AskUserTool())
 
         from likecc.tools.exit_plan_mode import ExitPlanModeTool
         self._exit_plan_tool = ExitPlanModeTool()
         self.registry.register(self._exit_plan_tool)
 
-        self.agent = Agent(
-            client=self.client,
-            registry=self.registry,
-            protocol=provider.protocol,
-            work_dir=work_dir,
-            permission_checker=checker,
-            context_window=provider.get_context_window(),
-            instructions_content=self._instructions_content,
-            memory_manager=self.memory_manager,
-            hook_engine=self.hook_engine,
-        )
+        self.agent.memory_manager = self.memory_manager
         self.agent.file_history = self.file_history
         self.agent.session_id = self.session.session_id
 
@@ -755,8 +767,8 @@ class LikeCCApp(App):
         # Layer 2: 在后台异步拉取模型的 context window，不阻塞启动流程。
         # agent 已经有一个同步解析的窗口值（来自配置 / 映射表 / 默认值）；
         # 如果异步拉取成功，就原地升级为更准确的值。
-        self.run_worker(
-            self._resolve_context_window(provider), exclusive=False
+        self._context_window_task = self._spawn_task(
+            self._resolve_context_window(provider), name="context-window"
         )
 
         self.skill_loader = SkillLoader(work_dir)
@@ -789,71 +801,17 @@ class LikeCCApp(App):
             self.command_registry, self.skill_loader, self.skill_executor
         )
 
-        # --- Worktree 系统初始化 ---
-        from likecc.config import WorktreeConfig
-        wt_cfg = self._worktree_config or WorktreeConfig()
-        self.worktree_manager = WorktreeManager(
-            repo_root=work_dir,
-            symlink_directories=wt_cfg.symlink_directories,
-            on_work_dir_change=self._sync_worktree_context,
+        self.runtime.assemble_delegation(
+            interactive=True, on_work_dir_change=self._sync_worktree_context,
         )
-        self.worktree_manager.restore_session()
-
-        wt_command = create_worktree_command(self.worktree_manager)
-        self.command_registry.register_sync(wt_command)
-
-        from likecc.tools.enter_worktree import EnterWorktreeTool
-        from likecc.tools.exit_worktree import ExitWorktreeTool
-        self.registry.register(EnterWorktreeTool(worktree_manager=self.worktree_manager))
-        self.registry.register(ExitWorktreeTool(worktree_manager=self.worktree_manager))
-
-        self._stale_cleanup_task = asyncio.create_task(
-            start_stale_cleanup_task(
-                self.worktree_manager,
-                wt_cfg.stale_cleanup_interval,
-                wt_cfg.stale_cutoff_hours,
-            )
-        )
-
-        # --- 子 agent 系统初始化 ---
-        self.agent_loader = AgentLoader(
-            work_dir, enable_verification=self._enable_verification_agent
-        )
-        self.agent_loader.load_all()
-
-        # --- Agent 团队系统初始化 ---
-        from likecc.teams.manager import TeamManager
-        from likecc.tools.team_create import TeamCreateTool
-        from likecc.tools.team_delete import TeamDeleteTool
-
-        self.team_manager = TeamManager(worktree_manager=self.worktree_manager, trace_manager=self.trace_manager)
-
-        agent_tool = AgentTool(
-            agent_loader=self.agent_loader,
-            task_manager=self.task_manager,
-            trace_manager=self.trace_manager,
-            parent_agent=self.agent,
-            enable_fork=self._enable_fork,
-            provider_config=provider,
-            worktree_manager=self.worktree_manager,
-            team_manager=self.team_manager,
-        )
-        self.registry.register(agent_tool)
-
-        team_create_tool = TeamCreateTool(
-            team_manager=self.team_manager,
-            parent_agent=self.agent,
-            teammate_mode=self._teammate_mode,
-            is_interactive=True,
-            enable_coordinator_mode=self._enable_coordinator_mode,
-        )
-        self.registry.register(team_create_tool)
-
-        team_delete_tool = TeamDeleteTool(
-            team_manager=self.team_manager,
-            parent_agent=self.agent,
-        )
-        self.registry.register(team_delete_tool)
+        self.worktree_manager = self.runtime.worktree_manager
+        self.agent_loader = self.runtime.agent_loader
+        self.team_manager = self.runtime.team_manager
+        wt_cfg = self.runtime.config.worktree or WorktreeConfig()
+        self.command_registry.register_sync(create_worktree_command(self.worktree_manager))
+        self._stale_cleanup_task = self._spawn_task(start_stale_cleanup_task(
+            self.worktree_manager, wt_cfg.stale_cleanup_interval, wt_cfg.stale_cutoff_hours,
+        ))
 
         agent_catalog = self.agent_loader.list_agents()
         if agent_catalog:
@@ -903,7 +861,7 @@ class LikeCCApp(App):
                         work_dir=(
                             self.agent.work_dir
                             if self.agent is not None
-                            else os.getcwd()
+                            else self._work_dir
                         ),
                     ),
                 ),
@@ -911,10 +869,10 @@ class LikeCCApp(App):
             )
 
         if self._mcp_server_configs:
-            self._mcp_init_task = asyncio.create_task(self._init_mcp())
+            self._mcp_init_task = asyncio.create_task(self._serve_mcp(), name="mcp-lifetime")
 
         self.query_one("#model-label", Static).update(provider.model)
-        work_dir = os.getcwd()
+        work_dir = self._work_dir
         self.query_one("#title-bar", Static).update(
             self._make_banner(provider.model, work_dir)
         )
@@ -930,7 +888,7 @@ class LikeCCApp(App):
         chat_input.load_history(work_dir)
         chat_input.focus()
 
-        self._notification_check_task = asyncio.create_task(
+        self._notification_check_task = self._spawn_task(
             self._start_notification_polling()
         )
 
@@ -945,10 +903,10 @@ class LikeCCApp(App):
         if self.agent is not None:
             self.agent.context_window = provider.get_context_window()
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+    async def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id == "provider-list":
             provider = self.providers[event.option_index]
-            self._select_provider(provider)
+            await self._select_provider(provider)
 
     # -----------------------------------------------------------------
     # UIController 协议实现
@@ -960,7 +918,7 @@ class LikeCCApp(App):
     def send_user_message(self, text: str) -> None:
         if self._streaming or self.agent is None:
             return
-        self._agent_task = asyncio.create_task(self._send_message(text))
+        self._agent_task = self._spawn_task(self._send_message(text))
 
     def set_plan_mode(self, enabled: bool) -> None:
         if self.agent is None:
@@ -1039,7 +997,7 @@ class LikeCCApp(App):
         if not is_command:
             if self._streaming or self.agent is None:
                 return
-            self._agent_task = asyncio.create_task(self._send_message(text))
+            self._agent_task = self._spawn_task(self._send_message(text))
             return
 
         if name == "":
@@ -1110,7 +1068,7 @@ class LikeCCApp(App):
         popup.show_pairs(matches)
 
     def on_chat_input_at_file_request(self, event: ChatInput.AtFileRequest) -> None:
-        work_dir = self.agent.work_dir if self.agent else os.getcwd()
+        work_dir = self.agent.work_dir if self.agent else self._work_dir
         matches = scan_files_for_at(event.prefix, work_dir)
         if matches:
             popup = self.query_one(CompletionPopup)
@@ -1203,15 +1161,18 @@ class LikeCCApp(App):
             from likecc.tools.base import StreamEnd, TextDelta
 
             side_client = create_client(provider)
-            mini_conv = ConversationManager()
-            mini_conv.history = [Message(role="user", content=user_message)]
-            collected = ""
-            async for event in side_client.stream(mini_conv, system=system_prompt):
-                if isinstance(event, TextDelta):
-                    collected += event.text
-                elif isinstance(event, StreamEnd):
-                    pass
-            return collected
+            try:
+                mini_conv = ConversationManager()
+                mini_conv.history = [Message(role="user", content=user_message)]
+                collected = ""
+                async for event in side_client.stream(mini_conv, system=system_prompt):
+                    if isinstance(event, TextDelta):
+                        collected += event.text
+                    elif isinstance(event, StreamEnd):
+                        pass
+                return collected
+            finally:
+                await side_client.aclose()
 
         try:
             results = await asyncio.wait_for(
@@ -1232,9 +1193,9 @@ class LikeCCApp(App):
     async def _send_message(self, text: str, is_notification: bool = False) -> None:
         assert self.agent is not None
 
-        if self._mcp_init_task and not self._mcp_init_task.done():
+        if self._mcp_init_task and not self._mcp_ready.is_set():
             self._show_system_message("Waiting for MCP servers to connect...")
-            await self._mcp_init_task
+            await self._mcp_ready.wait()
 
         self._streaming = True
         chat = self.query_one("#chat-area", VerticalScroll)
@@ -1244,7 +1205,7 @@ class LikeCCApp(App):
             text = expand_at_refs(text, self.agent.work_dir)
 
         # Start memory recall prefetch before UI work.
-        prefetch_task = asyncio.create_task(
+        prefetch_task = self._spawn_task(
             self._prefetch_relevant_memories(text)
         ) if text else None
 
@@ -1440,11 +1401,11 @@ class LikeCCApp(App):
                             self.agent.total_input_tokens
                             + self.agent.total_output_tokens
                         )
-                        asyncio.ensure_future(
+                        self._spawn_task(
                             self._update_session_summary()
                         )
                     if self.agent.plan_mode:
-                        asyncio.ensure_future(
+                        self._spawn_task(
                             self._show_plan_approval()
                         )
 
@@ -1477,6 +1438,8 @@ class LikeCCApp(App):
             await self._process_task_notifications()
 
     async def _process_task_notifications(self) -> None:
+        if self._closing:
+            return
         completed = self.task_manager.poll_completed()
         if not completed or self.agent is None:
             return
@@ -1492,7 +1455,7 @@ class LikeCCApp(App):
             if hasattr(self, 'team_manager'):
                 self.team_manager.on_teammate_completed(task.agent.agent_id)
 
-        self._agent_task = asyncio.create_task(
+        self._agent_task = self._spawn_task(
             self._send_message("", is_notification=True)
         )
 
@@ -1504,6 +1467,8 @@ class LikeCCApp(App):
                 await self._process_mailbox_notifications()
 
     async def _process_mailbox_notifications(self) -> None:
+        if self._closing:
+            return
         if not hasattr(self, "team_manager") or self.team_manager is None:
             return
         if self._streaming or self.agent is None:
@@ -1513,7 +1478,7 @@ class LikeCCApp(App):
             return
         for note in notes:
             self.conversation.add_system_reminder(note)
-        self._agent_task = asyncio.create_task(
+        self._agent_task = self._spawn_task(
             self._send_message("", is_notification=True)
         )
 
@@ -1785,11 +1750,10 @@ class LikeCCApp(App):
     async def _init_mcp(self) -> None:
         self._mcp_connecting = True
         self._update_mode_label()
-        manager = MCPManager()
+        manager = self.mcp_manager
         manager.load_configs(self._mcp_server_configs)
         tools_before = len(self.registry.list_tools())
         errors = await manager.register_all_tools(self.registry)
-        self.mcp_manager = manager
         self._mcp_connecting = False
         self._update_mode_label()
         for err in errors:
@@ -1820,17 +1784,33 @@ class LikeCCApp(App):
                 + "\n\n".join(parts)
             )
 
+    async def _serve_mcp(self) -> None:
+        # MCP/AnyIO contexts must exit in the task that entered them.
+        self.mcp_manager = MCPManager()
+        try:
+            try:
+                await self._init_mcp()
+            finally:
+                self._mcp_ready.set()
+            await self._mcp_stop.wait()
+        finally:
+            try:
+                await self.mcp_manager.shutdown()
+            finally:
+                self.mcp_manager = None
+                self._mcp_connecting = False
+
     async def _shutdown_mcp(self) -> None:
         if self._mcp_init_task is not None:
-            self._mcp_init_task.cancel()
+            if not self._mcp_ready.is_set():
+                self._mcp_init_task.cancel()
+            else:
+                self._mcp_stop.set()
             try:
                 await self._mcp_init_task
             except (asyncio.CancelledError, Exception):
                 pass
             self._mcp_init_task = None
-        if self.mcp_manager is not None:
-            await self.mcp_manager.shutdown()
-            self.mcp_manager = None
 
     async def _shutdown_hooks(self, *, run_shutdown_hook: bool = True) -> None:
         """Finish or cancel every hook task before Textual closes its loop."""
@@ -1878,7 +1858,7 @@ class LikeCCApp(App):
                             work_dir=(
                                 self.agent.work_dir
                                 if self.agent is not None
-                                else os.getcwd()
+                                else self._work_dir
                             ),
                         ),
                     )
@@ -1889,19 +1869,54 @@ class LikeCCApp(App):
                 finally:
                     self._hooks_closed = True
 
-    async def on_unmount(self) -> None:
-        """Fallback cleanup for forced, exceptional, and externally driven exits."""
-        try:
-            await asyncio.wait_for(
-                self._shutdown_hooks(
-                    run_shutdown_hook=not self._force_exit_requested
-                ),
-                timeout=3.0,
+    async def _close_resources(
+        self, *, run_shutdown_hook: bool = True, extract_memories: bool = False,
+    ) -> None:
+        if self._close_task is None:
+            self._closing = True
+            self._close_task = asyncio.create_task(
+                self._close_owned_resources(run_shutdown_hook, extract_memories),
+                name="tui-close",
             )
-        except asyncio.TimeoutError:
-            self.log.warning("Timed out while shutting down hooks")
-        except Exception as exc:
-            self.log.error("Hook shutdown failed: %s", exc)
+        await finish_cleanup(self._close_task)
+
+    async def _close_owned_resources(self, run_shutdown_hook: bool, extract_memories: bool) -> None:
+        self._stop_spinner()
+        self._stop_teammate_polling()
+        pending = list(self._entry_tasks)
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        try:
+            try:
+                await self.runtime.stop_background()
+            except Exception as exc:
+                self.log.error("Background shutdown failed: %s", exc)
+            cleanup = [asyncio.create_task(self._shutdown_hooks(
+                run_shutdown_hook=run_shutdown_hook,
+            ))]
+            cleanup.append(asyncio.create_task(self._shutdown_mcp()))
+            if extract_memories and self.agent and self.agent.memory_manager:
+                cleanup.append(asyncio.create_task(self.agent._extract_memories(self.conversation)))
+            _, pending_cleanup = await asyncio.wait(cleanup, timeout=3.0)
+            for task in pending_cleanup:
+                task.cancel()
+            for result in await asyncio.gather(*cleanup, return_exceptions=True):
+                if isinstance(result, Exception):
+                    self.log.error("Entry cleanup failed: %s", result)
+        finally:
+            try:
+                if self.session is not None:
+                    self.session.close()
+            finally:
+                await self.runtime.aclose()
+
+    async def on_unmount(self) -> None:
+        """Also close on test exit, mount failure and externally requested exit."""
+        await self._close_resources(run_shutdown_hook=not self._force_exit_requested)
 
     # -----------------------------------------------------------------
     # 退出
@@ -1927,48 +1942,7 @@ class LikeCCApp(App):
             return
         self._exit_requested = True
 
-        async def _cleanup() -> None:
-            tasks: list[asyncio.Task] = []
-
-            if self.agent and self.agent.memory_manager:
-                tasks.append(asyncio.create_task(
-                    self.agent._extract_memories(self.conversation)
-                ))
-            if self.hook_engine:
-                tasks.append(asyncio.create_task(
-                    self._shutdown_hooks(), name="hook-shutdown"
-                ))
-            tasks.append(asyncio.create_task(self._shutdown_mcp()))
-
-            if tasks:
-                _, pending = await asyncio.wait(tasks, timeout=3.0)
-                for task in pending:
-                    task.cancel()
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        self.log.error("Shutdown task failed: %s", result)
-
-            if self._stale_cleanup_task and not self._stale_cleanup_task.done():
-                self._stale_cleanup_task.cancel()
-
-            if hasattr(self, 'team_manager'):
-                for name in list(self.team_manager._teams):
-                    try:
-                        team = self.team_manager._teams[name]
-                        for m in team.members:
-                            team.set_member_active(m.name, False)
-                        self.team_manager.delete_team(name)
-                    except Exception:
-                        pass
-
-            if self.session:
-                self.session.close()
-
-        try:
-            await _cleanup()
-        except Exception:
-            pass
+        await self._close_resources(extract_memories=True)
         self.exit()
 
     def _show_error(self, text: str) -> None:

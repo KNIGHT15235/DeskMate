@@ -66,7 +66,6 @@ class SendMessageTool(Tool):
             )
 
         from likecc.teams.mailbox import create_message
-        from likecc.teams.registry import AgentNameRegistry
 
         team = self._team_manager.get_team(self._team_name)
         if team is None:
@@ -85,7 +84,7 @@ class SendMessageTool(Tool):
             metadata=p.metadata,
         )
 
-        registry = AgentNameRegistry.instance()
+        registry = self._team_manager.name_registry
 
         if p.to == "*":
             member_ids = [

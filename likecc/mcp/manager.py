@@ -28,8 +28,8 @@ class MCPManager:
         for name, config in self._configs.items():
             try:
                 client = MCPClient(config)
-                await client.connect()
                 self._clients[name] = client
+                await client.connect()
 
                 tools = await client.list_tools()
                 for tool_def in tools:

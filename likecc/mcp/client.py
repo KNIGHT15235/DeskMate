@@ -49,7 +49,7 @@ class MCPClient:
             self._session = session
             self._alive = True
             logger.info("MCP server '%s' connected", self.name)
-        except Exception:
+        except BaseException:
             await self._cleanup_stack()
             raise
 
