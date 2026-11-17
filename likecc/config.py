@@ -218,14 +218,15 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
     return base
 
 
-def load_config(path: Path | None = None) -> AppConfig:
+def load_config(path: Path | None = None, *, work_dir: str | Path | None = None,
+                user_home: str | Path | None = None) -> AppConfig:
     if path is not None:
         if not path.exists():
             raise ConfigError(f"Config file not found: {path}")
         return _load_single_file(path)
 
-    cwd = Path.cwd()
-    home = Path.home()
+    cwd = Path(work_dir).resolve() if work_dir is not None else Path.cwd()
+    home = Path(user_home) if user_home is not None else Path.home()
     candidates = [
         home / ".likecc" / "config.yaml",
         cwd / ".likecc" / "config.yaml",

@@ -47,9 +47,9 @@ def process_includes(
     return "\n".join(result)
 
 
-def load_instructions(project_root: str) -> str:
+def load_instructions(project_root: str, *, user_home: str | Path | None = None) -> str:
     root = Path(project_root)
-    home = Path.home()
+    home = Path(user_home) if user_home is not None else Path.home()
 
     paths = [
         root / "LIKECC.md",

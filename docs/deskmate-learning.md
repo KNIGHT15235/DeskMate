@@ -1,8 +1,8 @@
-# DeskMate R1 / R2 学习记录
+# DeskMate R1 / R2 / R3 学习记录
 
 本文记录本轮代码结构和可复现行为，不代写个人学习体会。路线与验证入口：[roadmap](deskmate-roadmap.md)、[verification](verification.md)。
 
-前半部分保留 R1 时点的学习材料；当前执行和会话接口见文末 R2，不能把 R1 的“两套循环仍独立”等描述当作当前实现。
+前半部分保留 R1/R2 时点的学习材料；当前执行、会话与桌面线程模型见各轮记录及文末 R3，不能把 R1 的“两套循环仍独立”等描述当作当前实现。
 
 ## 为什么从 TUI 中提取装配
 
@@ -256,3 +256,98 @@ finally:
 ```
 
 不要从两个窗口同时调用同一个服务；重叠请求会被拒绝。桌面入口需要选择自己的线程与事件消费策略，及时消费单订阅队列；当前没有网络协议、跨线程投递、持久权限队列或自动重试副作用。
+
+## R3 学习记录：窗口外的应用生命周期
+
+R2 已提交到 `7f09816729ca63717b050f0cd9690c79049d456e`。本节对应其后的 R3 未提交工作区，R1/R2 前文保留各轮历史含义。
+
+### 三个执行位置与所有权
+
+| 位置 | 当前代码 | 负责对象 |
+| --- | --- | --- |
+| Qt 主线程 | `desktop/window.py: ChatWindow`；`desktop/application.py: DesktopApplication` | 控件、托盘、定时拉取展示快照和关闭选择 |
+| 专用 Python 工作线程 | `desktop/controller.py: DesktopController._thread_main / _lifetime` | 长期 asyncio loop、Runtime 和 SessionService 生命周期 |
+| 工作线程中的异步任务 | `_dispatch / _consume`，R2 Agent/RunHandle/Interaction | 模型与工具、唯一事件消费、权限回复与取消 |
+
+线程是非 daemon 的 threading.Thread；asyncio.run 只在这个线程使用。不是把一个方法放进 QThread 子类就假定它在后台，也没有引入第二个 Qt/asyncio 整合框架。
+
+### 点击发送到保存与展示
+
+```text
+Qt 按钮 → DesktopController.submit('send', text=...)
+       → loop.call_soon_threadsafe → _dispatch
+       → SessionService.start(interactive=True) → Agent 共享执行内核
+       → 用户输入和工具链保存 → RunHandle.events（_consume 唯一订阅）
+       → RunEvent.to_dict → _event → 有界展示模型
+       → Qt 主线程 QTimer 拉取 snapshot 副本 → ChatWindow.refresh
+
+权限按钮 → submit('reply', session_id/run_id/request_id/value)
+         → _dispatch 校验 → 后台 run.reply → 后端接受结果 → GUI 确认
+```
+
+所有 Runtime、client 和 Future 在所属后台循环内创建、使用和关闭。界面没有拿到 RunHandle、没有调用 Future.result()、没有长时间 join 或网络调用。问答按 schema 的 name 取值；权限默认只给当前请求批准或拒绝。
+
+### UI 解耦不自动意味着线程安全
+
+R2 事件没有 Textual 对象，解决了界面耦合，但 asyncio.Future/Queue/Task 仍归某个 loop 所有。若 Qt 按钮直接调用 run.reply 或 Task.cancel，仍可能跨线程操作。
+
+当前 submit 使用 call_soon_threadsafe，返回命令 ID；真正的回复/取消发生在后台。GUI 拉取 snapshot 时只得到 deepcopy 的普通数据，修改它不会改变后端。`tests/test_desktop_controller.py::test_worker_owns_resources_and_demo_uses_real_service` 记录创建、运行、回复和关闭的线程 ID/loop ID；GUI 测试另外约束 refresh 在主线程执行。
+
+### 为什么消费者属于应用
+
+R2 的事件流只允许一个消费者，关闭消费者会取消运行。如果每次打开窗口重新订阅，就可能取消旧请求或重复执行工具。当前 DesktopController 的 _consume 与窗口是否可见无关；窗口只显示已有快照，新建/恢复才调用服务的会话 API。
+
+文本连续增量合并，GUI 以 50ms 定时刷新，不产生每 token 一个 Qt 更新。缓存有条数和字符限额，截断可见；待回复请求独立保存。工具、请求、错误、结束仍按后台消费顺序处理，普通历史和完整工具结果没有被展示截断改写。R2 内部队列仍未设置硬上限，这是明确保留的限制。
+
+### 隐藏、取消、退出是不同操作
+
+- 隐藏：窗口不可见，控制器、运行和唯一消费者继续。有托盘才允许默认隐藏；无托盘时提供最小化/退出/取消，避免无法找回。
+- 取消：RunHandle.cancel 清理本次等待/执行，运行以 cancelled 收尾，可以继续下一次输入；既有文件修改不会因此撤销。
+- 退出：进入 closing，拒绝迟到命令，Runtime.aclose 清理资源树，再等待 loop/工作线程结束，最后退出 Qt。慢关闭会显示仍在等待，不用 daemon、terminate 或 os._exit 伪装完成。
+
+`tests/test_desktop_lifecycle.py` 测试托盘存在/消失、无托盘关闭选择、重复退出、权限等待时退出与慢关闭。实际 WSLg 没有托盘，存在托盘的策略通过 FakeTray 测试，不能称为实际 Windows 托盘验证。
+
+### R2 遗留边界：父进程退出不代表管道已结束
+
+真实构造命令 `sleep 30 & echo $! > child.pid`：shell 很快退出并有 returncode=0，但 sleep 继承输出管道，communicate 仍会等待 EOF。R2 terminate 只在 returncode is None 时清理，因此超时和取消都会遗留 sleep。
+
+R3 的 `tools/bash.py: _terminate_owned_process()` 对自己以 start_new_session 启动的 POSIX 进程组发送信号，无论 shell 是否已退出；然后等待进程并收回输出传输。进程已不存在时忽略 ProcessLookupError，允许重复调用。没有向任意系统进程组发信号。
+
+`tests/test_bash_process_group.py` 先同步确认 pid 文件已生成、shell 已退出但工具未结束，再触发超时/取消，检测子进程停止；finally 清理自己的进程组。修复前两个回归失败，修复后通过。这是实际本机复现，不是性能实验或用户事故。Windows 和主动脱离进程组的子程序仍有边界。
+
+### 三种桌面证据不能混用
+
+1. offscreen Qt 自动化：实际创建控件，点击按钮、输入答案并验证调用链；没有实际桌面窗口或托盘。
+2. WSLg Wayland 本机窗口：本轮实际显示窗口并截图，权限卡片可见、正常退出；托盘检测为 False。还不能据此认定人工完整使用流程已经验收。
+3. Windows 原生 Python/托盘：本轮没有执行。WSLg 窗口出现在 Windows 桌面，不表示 Windows 进程树、托盘或打包兼容已验证。
+
+### 五个面试问答
+
+1. **怎样证明资源真的在后台线程？** Runtime 工厂在 _open 中调用，而 _open 在工作 loop 的任务中执行。测试记录构造、run、reply、close 的线程/loop 标识一致，且不同于 GUI 线程；不是仅凭类名判断。
+2. **为什么一个长期 loop 优于每个按钮 asyncio.run？** 模型客户端、交互 Future 和 SessionService 的归属稳定；同一次运行的批准/取消不会落到已经结束或另一个 loop。当前只有线程入口使用 asyncio.run。
+3. **权限等待为什么不会堵住按钮回复？** send 只创建运行与独立消费者，不等待整次执行结束才释放命令通道。reply/cancel 是另外的后台任务，能完成原运行正在等待的 Future。
+4. **怎样避免 token 更新把 GUI 消息队列撑大？** 后台合并文本到受限展示模型，Qt 定时读取快照，不逐 token 发 Qt 消息。超限有提示；该机制不是服务持久化截断，也不承诺所有内部队列已有硬上限。
+5. **为何父 shell returncode 不足以判断退出完成？** 它只描述一个进程；子进程可能持有 stdout/stderr，管道仍未 EOF。当前 POSIX 回收自己的进程组并收回传输，测试分别验证父退出、子停止与管道结束。
+
+### 两个手动小实验
+
+先在 WSL 激活 cc 并进入开发目录。
+
+```bash
+source /home/ldj/anaconda3/etc/profile.d/conda.sh
+conda activate cc
+cd /mnt/d/ldj/03/DeskMate
+python -m likecc.desktop --demo
+```
+
+**实验一：允许、拒绝、等待与取消。** 发送任务，第一次拒绝写入；问答选择完成。新建会话再批准，通过界面工作区路径检查 demo.txt。问答选择等待取消，观察界面仍能点击；有托盘时隐藏再恢复，确认仍是同一运行。点击取消后再次发送，检查没有卡片残留。关闭应用后临时目录会删除。无托盘时使用最小化，不强行隐藏。该实验的完整人工结果尚待用户验收。
+
+**实验二：父退出与后台 sleep。** 不自行留下 sleep，直接运行有 finally 清理的回归：
+
+```bash
+PYTHONUTF8=1 python -m pytest -q -s -o cache_dir=/tmp/deskmate-r3-pytest-cache tests/test_bash_process_group.py
+```
+
+阅读测试中的同步条件，确认 shell returncode=0 时 task 尚未结束；再看 _terminate_owned_process 去掉 returncode 条件的原因。可在本地临时打印父/子状态观察，不必修改已提交基线；实验后去掉打印。测试构造和真实模型效果无关。
+
+更多启动选项、已验证/待验收范围见 [桌面说明](deskmate-desktop.md)。R4 的个人事务能力尚未开始。

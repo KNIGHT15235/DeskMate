@@ -13,6 +13,24 @@ from likecc.tools.work_dir import get_tool_work_dir
 MAX_TIMEOUT = 600
 
 
+async def _terminate_owned_process(proc) -> None:
+    """Only for shells started with start_new_session on POSIX.
+
+    returncode describes the shell, not the group or inherited output pipes.
+    """
+    if proc is None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        elif proc.returncode is None:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+    await proc.wait()
+    await proc.communicate()  # reap transports even after communicate was cancelled
+
+
 class Params(BaseModel):
     command: str = Field(description="Shell command to execute")
     timeout: int = Field(default=120, description="Timeout in seconds (max 600)")
@@ -30,15 +48,8 @@ class Bash(Tool):
         proc = None
 
         async def terminate() -> None:
-            if proc is not None and proc.returncode is None:
-                try:
-                    if os.name == "posix":
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    else:
-                        proc.kill()
-                except ProcessLookupError:
-                    pass
-                await proc.wait()
+            from likecc.runtime import finish_cleanup
+            await finish_cleanup(asyncio.create_task(_terminate_owned_process(proc)))
 
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -53,8 +64,7 @@ class Bash(Tool):
             await terminate()
             return ToolResult(output=f"Error: command timed out after {timeout}s", is_error=True)
         except asyncio.CancelledError:
-            from likecc.runtime import finish_cleanup
-            await finish_cleanup(asyncio.create_task(terminate()))
+            await terminate()
             raise
         except Exception as e:
             return ToolResult(output=f"Error executing command: {e}", is_error=True)

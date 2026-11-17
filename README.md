@@ -2,7 +2,7 @@
 
 一个学习 Claude Code 工作方式的 Python 终端编程助手实验项目。当前开发副本以 LikeCC 0.2.0 为基线，逐步演进为 **DeskMate（桌伴）**：具备个人事务执行、个人记忆、后台调度和主动提醒能力的桌面助手。
 
-本轮 R1 已提取独立于 Textual 的共享运行时装配并明确资源生命周期；桌面界面及上述个人助手能力仍是后续计划。Python 包、CLI 和 `.likecc` 数据路径保持现有名称。进度和学习入口见 [DeskMate 路线图](docs/deskmate-roadmap.md) 与 [R1 学习记录](docs/deskmate-learning.md)。
+R1/R2 已建立共享运行时、统一执行内核与会话服务。R3 新增可选的 Qt 桌面入口、应用级后台控制器和托盘生命周期；个人事务、调度和新记忆能力仍是后续计划。Python 包、原 CLI 和 `.likecc` 数据路径保持现有名称。进度和学习入口见 [DeskMate 路线图](docs/deskmate-roadmap.md) 与 [学习记录](docs/deskmate-learning.md)。
 
 本项目为独立学习实践，与 Anthropic 无官方关联，也不声称复现 Claude Code 的完整内部实现。
 
@@ -30,6 +30,18 @@ uv sync --locked
 ```
 
 ## 配置与运行
+
+桌面入口单独安装可选依赖，原终端入口不需要 PySide6：
+
+```bash
+uv sync --locked --extra desktop
+uv run --locked --extra desktop python -m likecc.desktop --demo
+uv run --locked --extra desktop python -m likecc.desktop --work-dir /absolute/project --provider provider-name
+```
+
+已在 Conda `cc` 安装锁定依赖时，可直接运行 `python -m likecc.desktop --demo` 或 `python -m likecc.desktop --work-dir /mnt/d/ldj/03/DeskMate`。安装本项目后也可使用 `deskmate` 命令。
+
+演示使用临时工作区与独立用户数据根，不读取真实凭据。真实模式使用选定工作区配置，权限默认 `default`；Skills、MCP、Hooks、记忆和摘要须分别显式启用。桌面当前禁用委派/团队/Worktree/计划模式工具。实际 WSLg 窗口已启动验证，当前环境没有系统托盘；有托盘策略已自动化测试，真实托盘和原生 Windows 尚待人工验收。安装、生命周期与验收步骤见 [桌面说明](docs/deskmate-desktop.md)。
 
 在需要处理的项目目录中创建 `.likecc/config.yaml`，参考 [配置示例](examples/config.example.yaml)。将 `YOUR_MODEL` 和服务地址替换为实际可用的配置。
 

@@ -61,6 +61,7 @@ class Runtime:
         permission_mode: PermissionMode, hook_engine: HookEngine | None = None,
         cache_files: bool = False,
         client_factory: Callable | None = None,
+        user_home: str | Path | None = None,
     ) -> None:
         self.config = deepcopy(config)
         self.work_dir = str(Path(work_dir).resolve())
@@ -68,6 +69,7 @@ class Runtime:
         self.hook_engine = hook_engine  # borrowed; never started/closed here
         self.file_cache = FileCache() if cache_files else None
         self._client_factory = client_factory
+        self.user_home = Path(user_home).resolve() if user_home is not None else None
         self.registry = create_default_registry(file_cache=self.file_cache)
         self.task_manager = tasks.TaskManager()
         self.trace_manager = TraceManager()
@@ -100,7 +102,7 @@ class Runtime:
             self.client = (self._client_factory or clients.create_client)(self.provider)
             if resolve_context:
                 await clients.resolve_context_window(self.provider)
-            home = Path.home()
+            home = self.user_home if self.user_home is not None else Path.home()
             root = Path(self.work_dir)
             self.checker = PermissionChecker(
                 detector=DangerousCommandDetector(), sandbox=PathSandbox(self.work_dir),
@@ -116,7 +118,7 @@ class Runtime:
                 client=self.client, registry=self.registry, protocol=self.provider.protocol,
                 work_dir=self.work_dir, permission_checker=self.checker,
                 context_window=self.provider.get_context_window(),
-                instructions_content=load_instructions(self.work_dir),
+                instructions_content=load_instructions(self.work_dir, user_home=self.user_home),
                 hook_engine=self.hook_engine,
             )
             # Preserve the historical root, but never reuse another runtime's

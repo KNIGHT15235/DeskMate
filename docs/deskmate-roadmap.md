@@ -1,23 +1,23 @@
-# DeskMate 开发路线与 R1 / R2 记录
+# DeskMate 开发路线与 R1 / R2 / R3 记录
 
 ## 路线状态
 
 | 轮次 | 目标 | 状态 |
 | --- | --- | --- |
 | R1 | 共享装配与生命周期 | 已完成，保留下方历史记录 |
-| R2 | 统一执行与会话服务 | 已完成，见文末 R2 记录 |
-| R3 | 桌面入口 | 计划，未实现 |
+| R2 | 统一执行与会话服务 | 已完成并推送，见 R2 与 R3 基线记录 |
+| R3 | 桌面入口 | 代码与自动化已实现；WSLg 窗口实测，真实托盘/人工验收待完成 |
 | R4 | 个人事务流程 | 计划，未实现 |
 | R5 | 持久任务与调度 | 计划，未实现 |
 | R6 | 个人记忆 | 计划，未实现 |
 | R7 | 主动通知与交互 | 计划，未实现 |
 | R8 | 演示、打包、验证和文档整合 | 计划，未实现 |
 
-DeskMate（桌伴）是目标产品名称。本轮保持 Python 包 `likecc`、CLI `likecc`、配置目录 `.likecc`、项目规则 `LIKECC.md` 以及历史会话路径；没有引入桌面 GUI、调度器、事务工具或新的个人记忆模型。
+DeskMate（桌伴）是目标产品名称。保持 Python 包 `likecc`、原 CLI `likecc`、配置目录 `.likecc`、项目规则 `LIKECC.md` 以及历史会话路径；R3 增加可选桌面入口 `deskmate`，调度器、事务工具和新的个人记忆模型仍属后续计划。
 
 ## R1 基线（2026-11-16）
 
-以下 R1 章节描述当时的代码与验证状态；当前实现的变化以文末 R2 章节为准。
+以下 R1/R2 章节描述各轮当时的代码与验证状态；当前实现的变化见文末 R3 章节。
 
 - 源目录：`D:\ldj\03\likecc`，分支 `main`，HEAD `4a9b77d281646385bf48fd85b8a03c4d28bbee23`，开始时无未提交修改。
 - 工作目录：`D:\ldj\03\DeskMate`，开始为空。通过 `git clone --no-hardlinks D:\ldj\03\likecc D:\ldj\03\DeskMate` 复制已跟踪代码及独立 Git 对象；未复制源目录的虚拟环境、私有配置、缓存或构建产物。源目录不作修改。副本远端为 `https://github.com/KNIGHT15235/likecc.git`，未提交、未推送。
@@ -168,3 +168,44 @@ R1 到此停止；提交与推送由用户执行。
 具备进入 R3 的服务接口条件：桌面入口可以接收 `RunEvent.to_dict()`、按标识回复，并显式取消/关闭。R3 仍是计划，需确定桌面技术、主线程与 asyncio 的衔接、窗口关闭/消费者断连策略、错误展示和配置入口，再验证实际桌面环境。
 
 仍未覆盖真实模型、远程 MCP、外部队友进程、原生 Windows 本轮回归及分发安装；R1 Windows 历史失败没有被宣称已修复。会话恢复不是持久任务恢复；权限等待仅在进程内；没有跨进程会话事务、任务调度或副作用回滚。直接使用 Agent/SessionManager 的低层调用方应自行避免并发；服务租约约束适用于 SessionService API。事件订阅当前单消费者，尚无跨线程传输或有界事件背压，桌面适配时需及时消费。
+
+## R2 提交与 R3 开发记录（2026-11-17）
+
+R2 已提交并推送到 `feat/deskmate`：`7f09816729ca63717b050f0cd9690c79049d456e`，父提交为 R1 `834ad1de41eae48559e984428a73e9c116fbcee8`。上方“未提交”等表述属于开发结束时的历史记录；R3 从此 R2 提交开始。
+
+### 基线与目标
+
+- 实际目录 `/mnt/d/ldj/03/DeskMate`，分支 `feat/deskmate`，HEAD 与 R2 SHA 完全一致，开始时工作区干净；没有适用 AGENTS.md。原 `/mnt/d/ldj/03/likecc` 保持 `4a9b77d281646385bf48fd85b8a03c4d28bbee23`、工作区干净。
+- 环境：Windows 10 下 WSL2 Ubuntu 24.04.4 LTS，内核 `6.6.87.2-microsoft-standard-WSL2`，Conda `cc`、Python 3.11.16。修改前实测完整基线 **775 passed，28.41 秒**。
+- 本轮实现可选 Qt 桌面入口，复用 R2 Runtime/SessionService/RunHandle/Interaction；不开发 R4，不提交或推送。
+
+### 四个检查点
+
+| 检查点 | 实际改动 | 验证状态 |
+| --- | --- | --- |
+| R3-0 | R2 遗留边界：Bash 超时/取消不再只判断 shell returncode；清理自己创建的 POSIX 进程组和输出管道 | 修复前新增测试 2 failed / 1 passed；最小修复后相关回归 77 passed |
+| R3-A | 无 Qt 的 DesktopController，专用非 daemon 线程/asyncio loop；命令通道、独立事件消费、展示快照 | 检查点 44 passed，资源创建、回复、运行、取消、关闭线程归属及 R2 契约通过 |
+| R3-B | Qt Widgets 对话/工具/权限/问答/会话；显式工作区配置；隔离演示 | 初始 GUI/控制器检查点 9 passed；后续增加完整 schema 和异常测试 |
+| R3-C | 实际托盘检测、隐藏/恢复/消失策略、无托盘选择、异步退出与慢关闭提示 | 桌面检查点 19 passed；最终全量包含 21 项桌面测试，真实托盘仍待人工验收 |
+
+最终完整回归 **800 passed，0 failed，0 skipped，67.77 秒**，比 R2 基线增加 25 项；独立 SubAgent **90/90**。此前一次全量为 796 passed，其后补足四种问答、慢关闭、工具退出和不支持问题类型等边界，以最终版本记录为准。完整命令、试验失败和环境证据见 verification 的 R3 节。耗时是单次记录，不代表性能提升。
+
+### 关键设计与取舍
+
+- Qt 主线程只持有窗口、控件、托盘与展示状态。`desktop/controller.py` 的 DesktopController 在一个长期工作线程内以 asyncio.run 管理 loop，在该 loop 创建、使用、关闭 Runtime、SessionService、交互 Future 和 client。
+- GUI 只调用 `submit()`，通过 call_soon_threadsafe 提交独立命令任务；执行的事件消费任务独立存在，权限等待不会堵塞回复/取消通道。`snapshot()` 返回加锁后的普通数据副本，Qt QTimer 每 50ms 拉取；不用每 token 投递 Qt 消息，不共享可变会话或 Future。
+- 后台是 RunHandle.events() 的唯一消费者。窗口隐藏、重新显示、重绘均不重新订阅。关联检查使用 session_id/run_id，回复再检查 request_id；展示记录保留 tool_id。
+- 高频连续文本合并，单条最多约 12000 字符，最多 200 条、总计约 180000 字符的展示缓存；截断有明确提示，权限请求独立保留。这里只限制展示缓存，没有宣称 R2 内部服务队列具有硬容量上限，也没有给现有 put_nowait 加不安全的 maxsize。
+- `config.load_config(work_dir=..., user_home=...)` 兼容扩展，保持既有优先级和 CLI 无参数语义，不使用 chdir。Runtime 与 load_instructions 增加显式 user_home 依赖注入，只为演示指定临时用户根，不全局修改 Path.home。
+- 演示与真实模式使用同一控制器和服务。DemoClient、DemoWait 注入内核；演示临时目录与真实用户数据隔离，关闭外部扩展、记忆/摘要和元数据查询，界面显著标记离线。完整退出才删除临时目录。
+- 桌面默认权限为 default，仅本次允许/拒绝/取消，无永久授权。Skills/MCP/Hooks/记忆/摘要各自显式启用。暂不装配委派/团队/Worktree，显式禁用计划/协调工具；原入口的工具表独立，不受影响。
+- `desktop/application.py` 的 DesktopApplication 属于整个应用。有托盘时窗口关闭隐藏；没有托盘时保留最小化/退出/取消选择；运行中托盘消失恢复窗口。退出等待 Runtime 资源树、事件消费者、loop 和线程结束后才退出 Qt。15 秒未结束时报告仍在等待，不强退。
+
+### 实现、证据与待验收
+
+- **已实现并自动化验证**：对话、工具过程、四类问答、权限关联/拒绝/超时、取消后再次提交、新建/恢复、线程归属、配置隔离、无 Qt 时 CLI/help、展示限额、关闭与异常处理。
+- **本机实际窗口证据**：存在 DISPLAY=:0、WAYLAND_DISPLAY=wayland-0 和 /mnt/wslg。默认 Qt 平台实际为 `wayland`，演示窗口可见、权限卡片已显示，并正常回收线程退出；截图保存在被忽略的 `.r1-verification/r3-desktop.png`。实际 `QSystemTrayIcon.isSystemTrayAvailable()` 为 False。
+- **待人工验收**：用户在实际桌面完整操作、实际系统托盘的隐藏/找回/待回复提示、Windows 原生 Python/托盘及 Windows Bash 进程树。本轮没有声称 offscreen 或模拟托盘等于这些验收。
+- **未验证/未实现范围**：真实模型、外部 MCP/Hook、打包安装、跨进程后端、退出/关机后的任务恢复、持久调度、新记忆与个人事务。POSIX 脱离工具拥有进程组的程序不在回收保证内。
+
+进入 R4 前，应先按 [桌面说明](deskmate-desktop.md) 完成人工验收和真实托盘验证，确认首个真实 Provider/工作区在预期权限下工作。若需要 Windows 原生前端连接 WSL 内核，另行设计进程边界；本轮没有悄悄引入双架构。R4–R8 仍是计划。

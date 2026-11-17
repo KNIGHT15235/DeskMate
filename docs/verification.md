@@ -235,3 +235,128 @@ cd /mnt/d/ldj/03/DeskMate
 - SessionService 只保证同进程租约与单次运行，不提供跨进程事务；低层 SessionManager 仍可被直接调用。取消不回滚外部副作用。当前权限等待、事件队列均在进程内，单消费者，无跨线程/网络或重启恢复承诺。
 - 不改变 `-p` 默认能力：无交互确认时拒绝，不新增持久会话/记忆/Skills/MCP；完整结果执行现在与 TUI 共享内核，并有意将迭代耗尽报告为失败。
 - 原目录最终检查仍为 `4a9b77d281646385bf48fd85b8a03c4d28bbee23`、干净工作区；DeskMate HEAD 未变，R2 改动保留未提交。
+
+## DeskMate R3（2026-11-17）
+
+### 基线与环境
+
+R2 已提交并推送：`7f09816729ca63717b050f0cd9690c79049d456e`，分支 `feat/deskmate`。上方 R2 的“未提交工作区”等描述保留历史含义。本轮从该 HEAD 的干净工作区开始，目录 `/mnt/d/ldj/03/DeskMate`，不提交、不推送、不修改全局 Git 配置，原 likecc 目录不动。
+
+Windows 10 / WSL2 Ubuntu 24.04.4 LTS，内核 `6.6.87.2-microsoft-standard-WSL2`；Conda `cc`、Python 3.11.16，解释器 `/home/ldj/anaconda3/envs/cc/bin/python`。下列命令先执行：
+
+```bash
+source /home/ldj/anaconda3/etc/profile.d/conda.sh
+conda activate cc
+cd /mnt/d/ldj/03/DeskMate
+```
+
+### 实际执行及结果
+
+1. **修改前完整基线**：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q --tb=short -o cache_dir=/tmp/deskmate-r3-pytest-cache
+   ```
+
+   **775 passed，0 failed，0 skipped，28.41 秒**。没有直接沿用 R2 反馈数字。
+
+2. **R3-0 先复现再修复**：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q --tb=short -o cache_dir=/tmp/deskmate-r3-pytest-cache tests/test_bash_process_group.py
+   ```
+
+   修复前 **2 failed / 1 passed，9.34 秒**：超时和取消后子 sleep 仍在运行，测试 finally 清理了自己的进程组。后增加重复清理测试并最小修复，再执行：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q --tb=short -o cache_dir=/tmp/deskmate-r3-pytest-cache \
+     tests/test_bash_process_group.py tests/test_execution_contract.py tests/test_worktree.py
+   ```
+
+   **77 passed，6.16 秒**。曾错误指定不存在的 tests/test_tools.py，pytest 报未找到文件、未运行测试；改为实际文件后得到上述结果。没有删除失败测试或降低子进程断言。
+
+3. **可选依赖**：
+
+   ```bash
+   uv lock --python /home/ldj/anaconda3/envs/cc/bin/python
+   uv export --frozen --extra desktop --group dev --no-emit-project \
+     --output-file /tmp/deskmate-r3-requirements.txt
+   uv pip install --python /home/ldj/anaconda3/envs/cc/bin/python \
+     --require-hashes -r /tmp/deskmate-r3-requirements.txt
+   # 环境默认镜像使锁文件源地址发生批量迁移，随后使用仓库原索引重新锁定：
+   uv lock --python /home/ldj/anaconda3/envs/cc/bin/python --default-index https://pypi.org/simple
+   ```
+
+   安装 **PySide6 / PySide6-Addons / PySide6-Essentials / shiboken6 6.8.3**。解析前后逐包比较，既有依赖版本没有变化；最终锁文件保留官方 PyPI 源，只增加 desktop extra、Qt 四包并由 uv 调整项目条目排序。未改系统图形配置或安装完整 Linux 桌面。
+
+4. **R3-A 检查点**：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q --tb=short -o cache_dir=/tmp/deskmate-r3-pytest-cache \
+     tests/test_desktop_controller.py tests/test_runtime_assembly.py tests/test_session_service.py
+   ```
+
+   **44 passed，13.86 秒**。此前配置测试样例缺少既有规则要求的 base_url，产生 1 failed / 43 passed；补齐 fake 样例，未放宽配置校验。
+
+5. **R3-B/C 桌面检查点**：
+
+   ```bash
+   PYTHONUTF8=1 QT_QPA_PLATFORM=offscreen python -m pytest -q --tb=short \
+     -o cache_dir=/tmp/deskmate-r3-pytest-cache \
+     tests/test_desktop_window.py tests/test_desktop_controller.py
+   # 随后加入托盘生命周期及补充边界：
+   PYTHONUTF8=1 QT_QPA_PLATFORM=offscreen python -m pytest -q --tb=short \
+     -o cache_dir=/tmp/deskmate-r3-pytest-cache \
+     tests/test_desktop_lifecycle.py tests/test_desktop_window.py tests/test_desktop_controller.py
+   ```
+
+   前者 **9 passed，15.15 秒**。后者最终补充阶段 **19 passed，27.17 秒**，之后加入工具退出/不支持问答的两项测试，纳入下列最终全量。
+
+   中途 **2 failed / 14 passed**：一项 GUI 测试在控件刷新前点击禁用发送按钮，改用明确的 UI 就绪条件；另一项揭示文本刚好到达展示上限时缺少截断标记，已修复实际展示边界并保留原断言。没有用长 sleep 或跳过失败掩盖时序问题。
+
+6. **最终完整回归**：
+
+   ```bash
+   PYTHONUTF8=1 QT_QPA_PLATFORM=offscreen python -m pytest -q --tb=short \
+     -o cache_dir=/tmp/deskmate-r3-pytest-cache \
+     > .r1-verification/r3-full-pytest.log 2>&1
+   PYTHONUTF8=1 python tests/verify_subagent.py > .r1-verification/r3-subagent.log 2>&1
+   python -m compileall -q likecc examples
+   python -m likecc --help
+   python -m likecc.desktop --help
+   git diff --check
+   ```
+
+   **800 passed，0 failed，0 skipped，67.77 秒**；比修改前基线新增 **25** 项（4 项 POSIX 回收、21 项桌面相关参数展开测试）。独立 SubAgent **90/90**，编译与两个帮助入口退出 0，差异格式检查通过。之前一次全量为 796 passed / 51.84 秒，最终计数以上述完整版本为准；这些耗时不是性能指标。
+
+   GUI 专项仅在明确缺少 optional extra 时允许 importorskip。本轮已安装 extra，最终没有跳过任何 GUI 测试；既有核心测试全部继续执行。fresh-interpreter 测试阻止 PySide6 导入，原 CLI/core 和桌面 help 正常；启动桌面则给安装提示并退出 2。
+
+### 显示与托盘证据分开记录
+
+收尾另执行 `uv lock --check --offline --default-index https://pypi.org/simple`，锁文件一致性通过；将配置错误测试改为明确不存在的工作区以避免读取真实用户配置后，单独重跑 `tests/test_desktop_controller.py::test_config_error_recovery_and_repeat_exit`，**1 passed，2.96 秒**。这项仅调整测试隔离输入，业务代码与上述 800 项回归版本一致。最终 WSLg 冒烟再次正常退出，暂存区为空，HEAD 未变；进程检查未发现本轮演示或 sleep 30 测试进程残留。
+
+| 证据 | 本轮实际结果 |
+| --- | --- |
+| offscreen Qt 自动化 | 实际创建 Widgets，操作权限、问答、取消、会话和关闭对话；全部通过 |
+| WSLg 实际显示窗口 | DISPLAY=:0、WAYLAND_DISPLAY=wayland-0，实际 Qt 平台 wayland；窗口可见，权限卡片显示，正常关闭且线程结束 |
+| 实际系统托盘 | QSystemTrayIcon.isSystemTrayAvailable() 返回 False，没有声称真实托盘验收 |
+| 模拟托盘 | FakeTray 验证存在、隐藏、待处理标记、恢复、消失后恢复窗口；这属于策略自动化 |
+| 用户完整人工验收 | 待按 deskmate-desktop.md 步骤完成 |
+| 原生 Windows Python/托盘 | 未运行 |
+
+实际 WSLg 冒烟使用本地忽略目录 `.r1-verification/r3_display.py`，默认显示平台，未设置 offscreen：
+
+```bash
+PYTHONPATH=. python .r1-verification/r3_display.py
+```
+
+它创建同一个 DesktopApplication/Controller、发送演示请求、观察权限等待并保存 `.r1-verification/r3-desktop.png` 和 `r3-display.json`，再请求正常退出；实际结果是 `platform=wayland; tray_available=false; window_visible=true; state=waiting; demo=true`。截图经过查看，中文、工具过程和权限卡片可见。正常启动逻辑没有设置 QT_QPA_PLATFORM。
+
+### 覆盖与限制
+
+- 行为测试覆盖：线程/loop 所有权；批准、拒绝、过期与旧运行回复；配置/模型错误恢复；请求超时；四类问答 name 映射及不支持类型取消；高频合并/限额和关键工具事件顺序；隐藏不取消、恢复不重复执行；模型/工具/权限等待和初始化期间退出；重复退出、慢关闭提示和无线程遗留。
+- 演示测试阻止真实 HOME 读取及 Python socket 连接，走同一 SessionService 路径；临时目录在完整关闭后删除，不全局修改 Path.home。MCP/Hooks/Skills/记忆/摘要/元数据查询在 demo 均关闭。
+- 实际 WSLg 可见窗口不等于 Windows 原生托盘；offscreen 与 FakeTray 不能代替人工桌面验收。没有运行真实模型、外部 MCP/Hook、外部终端队友、打包与安装验证。
+- 继承 R2 的进程内单会话、单消费者和无跨进程事务边界。展示缓存有界，R2 内部服务队列仍没有硬容量限制。关闭不回滚副作用，不支持关机/退出后的任务恢复。
+- POSIX 修复仅覆盖工具拥有的新进程组；Windows 完整进程树回收、主动脱离该组的程序仍未保证。
+- R3 代码、测试和文档留在工作区，HEAD 仍为 R2 SHA，未提交/推送；原 likecc 目录保持原 HEAD 和干净工作区。R4 未开始。
