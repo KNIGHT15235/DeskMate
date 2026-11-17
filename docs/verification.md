@@ -139,3 +139,99 @@ uv pip install --python /home/ldj/anaconda3/envs/cc/bin/python \
 - 两种入口的能力差异保留：headless 不新增 Memory、Session、Skill、MCP 全套装配；两套执行循环仍独立。关闭时回收原本可能遗漏的后台任务属于 R1 生命周期修正。
 - 不迁移已有用户配置/历史数据。新运行实例的工具结果在原根目录下增加独立子目录；这些结果保留供历史引用，新的长期保留策略尚未实现。
 - 测试结束核对源仓库仍为基线 HEAD、工作区干净；DeskMate 中没有提交或推送。
+
+## DeskMate R2（2026-11-16）
+
+本节对应 `834ad1de41eae48559e984428a73e9c116fbcee8` 之上的未提交 R2 工作区；前述 R1 与更早版本结果保留历史含义。开发分支 `feat/deskmate`，目录 `D:\ldj\03\DeskMate` / `/mnt/d/ldj/03/DeskMate`。本轮不提交、不推送、不修改凭据或全局 Git 配置。
+
+### 环境及实际命令
+
+继续使用 R1 已准备好的 WSL2 Ubuntu 24.04 / conda `cc` / Python 3.11.16。无安装、依赖升级或锁文件修改。下列命令均在该目录执行，公共前缀为：
+
+```bash
+source /home/ldj/anaconda3/etc/profile.d/conda.sh
+conda activate cc
+cd /mnt/d/ldj/03/DeskMate
+```
+
+1. 修改前完整基线：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q -o cache_dir=/tmp/deskmate-r2-pytest-cache
+   ```
+
+   **740 passed，0 failed，0 skipped，28.56 秒**。不是直接引用 R1 报告数字。
+
+2. R2-A 检查点（统一循环、权限协议、模型/工具取消；尚未接入会话服务）：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q -o cache_dir=/tmp/deskmate-r2-pytest-cache \
+     tests/test_execution_contract.py tests/test_agent.py tests/test_runtime_assembly.py \
+     tests/test_document_headless.py tests/test_document_subagent.py tests/test_document_skill.py \
+     tests/test_recovery.py tests/test_tool_search.py tests/test_worktree.py \
+     tests/test_hook_lifecycle.py tests/test_document_runtime.py
+   ```
+
+   **189 passed，17.57 秒**。之前构造阶段发现异常被通用失败覆盖，已修复并保持原 headless 异常断言；两项新测试错误地假设 tool_result 一定是最后一条请求消息，已改为查找对应工具结果（后面可能还有 deferred-tool 提示）。Worktree 旧测试迁移到标识回复接口，目录捕获及文件内容断言保留。
+
+3. R2-B 受影响回归：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q -o cache_dir=/tmp/deskmate-r2-pytest-cache \
+     tests/test_runtime_assembly.py tests/test_document_runtime.py \
+     tests/test_document_headless.py tests/test_hook_lifecycle.py
+   ```
+
+   **45 passed，9.96 秒**。后续补充 TUI 命令/权限/问答与恢复测试后执行：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q --tb=short -o cache_dir=/tmp/deskmate-r2-pytest-cache \
+     tests/test_entry_service.py tests/test_session_service.py \
+     tests/test_execution_contract.py tests/test_runtime_assembly.py
+   ```
+
+   **54 passed，9.23 秒**（此后增加禁止 Textual 导入的完整服务演示测试）。
+
+4. 最终完整回归：
+
+   ```bash
+   PYTHONUTF8=1 python -m pytest -q --tb=short \
+     -o cache_dir=/tmp/deskmate-r2-pytest-cache \
+     > .r1-verification/r2-final-pytest.log 2>&1
+   ```
+
+   **775 passed，0 failed，0 skipped，23.19 秒**。比本轮基线增加 **35** 项参数展开测试。日志目录沿用已忽略的 `.r1-verification/`，不作为发布文件。最终版本包含会话切换时清理工具发现/压缩恢复状态，以及恢复后的累计 token 基线断言；之前一次 775 项通过为 23.38 秒，以最终这次为准。
+
+   中途完整回归曾为 **762 passed / 2 failed**：旧权限测试仍直接读 Future，按新公共协议迁移后保留原批准/拒绝断言；另一次为 **772 passed / 1 failed**：实际 AskUser UI 渲染触发 MarkupError，修复 Rich 渲染、动态文本转义和答案 name 映射后全量通过。未删除测试、跳过失败用例或降低原断言；不是 R1 基线失败。
+
+5. 独立 SubAgent、编译、CLI 及 Git 差异：
+
+   ```bash
+   PYTHONUTF8=1 python tests/verify_subagent.py
+   python -m compileall -q likecc examples/deskmate_session.py
+   python -m likecc --help
+   git diff --check
+   ```
+
+   **90/90**、退出码 0、原 LikeCC 帮助正常且退出 0、差异格式检查通过。独立脚本的 `Background task ... failed: boom` 是预期的构造失败路径，最终 90/90；本轮触及子 Agent 的执行内核，因此执行此项验证。
+
+6. 无 UI 演示（每次临时工作区，fake client，不读取真实凭据）：
+
+   ```bash
+   python -m examples.deskmate_session --decision allow
+   python -m examples.deskmate_session --decision deny
+   python -m examples.deskmate_session --decision cancel
+   ```
+
+   三项均退出 0。批准：`status=completed; file_created=True`；拒绝：`status=completed; file_created=False`；取消：`status=cancelled; file_created=False`，并报告取消已传播。每项均检查 `user_input_count=1; repeated_resume_unchanged=True`。最终全量还在全新解释器阻止所有 Textual 导入，运行批准演示成功。
+
+### 新增契约覆盖与边界
+
+- `test_execution_contract.py`：两个 Agent 接口共享工具过程和终止回答；权限、无 handler、相关 ID、重复/过期回复、等待超时、模型/工具/权限取消、流关闭、AskUser 请求先于等待、上限失败；WSL 真实本地 shell 进程取消回收。
+- `test_session_service.py`：不启动 UI 的执行/保存/恢复，原始模型异常、可恢复工具错误、输入唯一、召回临时性、崩溃尾部修复、同会话重叠拒绝、进程内会话租约、独立会话与后台任务、单次收尾、MCP 构造/连接失败可观察降级、Skills 初始化失败清理、Hook 不重复、记忆任务先于 client 回收。
+- `test_entry_service.py`：实际 Textual run_test 中权限批准/拒绝/取消、AskUser 键盘输入及答案传递、`/session new`、恢复和 `/clear` 均操作服务拥有的历史。
+- 保留所有 R1 20 项契约测试；其中 MCP 包含临时本地 stdio 服务。没有把 fake 模型测试称作真实模型测试，也没有把 Textual 测试称作桌面 GUI 验收。
+- 本轮未运行原生 Windows 完整回归、真实模型请求、外部 MCP、tmux/iTerm2 队友、打包/安装。R1 记录的三个 Windows POSIX 命令兼容失败仍属未解决的平台边界。
+- SessionService 只保证同进程租约与单次运行，不提供跨进程事务；低层 SessionManager 仍可被直接调用。取消不回滚外部副作用。当前权限等待、事件队列均在进程内，单消费者，无跨线程/网络或重启恢复承诺。
+- 不改变 `-p` 默认能力：无交互确认时拒绝，不新增持久会话/记忆/Skills/MCP；完整结果执行现在与 TUI 共享内核，并有意将迭代耗尽报告为失败。
+- 原目录最终检查仍为 `4a9b77d281646385bf48fd85b8a03c4d28bbee23`、干净工作区；DeskMate HEAD 未变，R2 改动保留未提交。

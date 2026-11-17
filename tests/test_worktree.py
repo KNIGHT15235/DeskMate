@@ -681,17 +681,19 @@ class TestWorktreeManager:
         )
         agent.file_history = history
 
+        from likecc.interaction import Interaction
+        interaction = Interaction()
         write_stream = agent._execute_tool(
             ToolCallComplete(
                 "write-after-wait",
                 "WriteFile",
                 {"file_path": "created.txt", "content": "captured"},
-            )
+            ), interaction=interaction,
         )
         write_request = await anext(write_stream)
         assert isinstance(write_request, PermissionRequest)
         agent.work_dir = str(root_b)
-        write_request.future.set_result(PermissionResponse.ALLOW)
+        assert interaction.reply(write_request.run_id, write_request.request_id, PermissionResponse.ALLOW)
         write_result, _, _ = await anext(write_stream)
 
         assert not write_result.is_error
@@ -707,12 +709,12 @@ class TestWorktreeManager:
                     "read-after-wait",
                     "ReadFile",
                     {"file_path": "note.txt"},
-                )
+                ), interaction=interaction,
             )
             read_request = await anext(read_stream)
             assert isinstance(read_request, PermissionRequest)
             agent.work_dir = str(root_b)
-            read_request.future.set_result(PermissionResponse.ALLOW)
+            assert interaction.reply(read_request.run_id, read_request.request_id, PermissionResponse.ALLOW)
             read_result, _, _ = await anext(read_stream)
 
         assert not read_result.is_error

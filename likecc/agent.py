@@ -5,12 +5,13 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from pydantic import ValidationError
 
+from likecc.interaction import Interaction, PermissionRequest, PermissionResponse, UserInputRequest
 from likecc.client import LLMClient
 from likecc.context import (
     CompactBoundary,
@@ -104,6 +105,8 @@ class TurnComplete:
 @dataclass
 class LoopComplete:
     total_turns: int
+    status: str = "completed"
+    result: str = ""
 
 
 @dataclass
@@ -115,6 +118,7 @@ class UsageEvent:
 @dataclass
 class ErrorEvent:
     message: str
+    fatal: bool = False
 
 
 @dataclass
@@ -134,19 +138,6 @@ class HookEvent:
     success: bool
 
 
-class PermissionResponse(Enum):
-    ALLOW = "allow"
-    DENY = "deny"
-    ALLOW_ALWAYS = "allow_always"
-
-
-@dataclass
-class PermissionRequest:
-    tool_name: str
-    description: str
-    future: asyncio.Future[PermissionResponse]
-
-
 AgentEvent = (
     StreamText
     | ThinkingText
@@ -158,6 +149,7 @@ AgentEvent = (
     | UsageEvent
     | ErrorEvent
     | PermissionRequest
+    | UserInputRequest
     | CompactNotification
     | HookEvent
 )
@@ -355,6 +347,19 @@ class Agent:
         self.notification_fn: Callable[[], list[str]] | None = None
         self.file_history: Any = None
 
+    def reset_session_context(self) -> None:
+        """Forget conversation-local context while retaining runtime policy/tools."""
+        self.compact_breaker = CompactCircuitBreaker()
+        self.replacement_state = create_replacement_state()
+        self.recovery_state = RecoveryState()
+        self._current_conversation = None
+        self._last_system_prompt = None
+        self._loop_count = 0
+        self.total_input_tokens = self.total_output_tokens = 0
+        self.clear_active_skills()
+        self.registry.clear_discovered()
+        self.registry.clear_file_caches()
+
     @property
     def _transcript_path(self) -> str:
         if self.session_id:
@@ -432,8 +437,26 @@ class Agent:
             for n in self.hook_engine.drain_notifications()
         ]
 
-    async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
-        self._current_conversation = conversation
+    async def run(
+        self, conversation: ConversationManager, *, interaction: Interaction | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Stream the shared loop. No interaction adapter means deny-on-ask."""
+        try:
+            async with aclosing(self._run_loop(conversation, interaction)) as events:
+                async for event in events:
+                    yield event
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            yield ErrorEvent(str(exc), fatal=True)
+            yield LoopComplete(0, status="failed")
+            raise
+        finally:
+            if interaction is not None:
+                interaction.close()
+
+    def prepare_context(self, conversation: ConversationManager) -> None:
+        """Idempotent static context preparation, also used before persistence."""
         env_context = build_environment_context(
             self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
         )
@@ -441,6 +464,12 @@ class Agent:
 
         memory_content = self.memory_manager.load() if self.memory_manager else ""
         conversation.inject_long_term_memory(self.instructions_content, memory_content)
+
+    async def _run_loop(
+        self, conversation: ConversationManager, interaction: Interaction | None,
+    ) -> AsyncIterator[AgentEvent]:
+        self._current_conversation = conversation
+        self.prepare_context(conversation)
 
         if self.hook_engine:
             ctx = self._build_hook_context("session_start")
@@ -458,8 +487,9 @@ class Agent:
 
             if iteration > self.max_iterations:
                 yield ErrorEvent(
-                    message=f"Agent reached maximum iterations ({self.max_iterations})"
+                    message=f"Agent reached maximum iterations ({self.max_iterations})", fatal=True
                 )
+                yield LoopComplete(self.max_iterations, status="limit")
                 break
 
             if self.hook_engine:
@@ -562,8 +592,9 @@ class Agent:
 
             collector = StreamCollector()
             llm_stream = self.client.stream(api_conv, system=system, tools=tools)
-            async for event in collector.consume(llm_stream):
-                yield event
+            async with aclosing(llm_stream):
+                async for event in collector.consume(llm_stream):
+                    yield event
 
             response = collector.response
 
@@ -620,11 +651,6 @@ class Agent:
                     response.text, thinking_blocks=conv_thinking
                 )
                 self._loop_count += 1
-                if (
-                    self._loop_count % MEMORY_EXTRACTION_INTERVAL == 0
-                    and self.memory_manager
-                ):
-                    asyncio.ensure_future(self._extract_memories(conversation))
                 if self.hook_engine:
                     ctx = self._build_hook_context("turn_end")
                     await self.hook_engine.run_hooks("turn_end", ctx)
@@ -635,7 +661,7 @@ class Agent:
                 if self.file_history is not None:
                     summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
                     self.file_history.make_snapshot(len(conversation.history), summary)
-                yield LoopComplete(total_turns=iteration)
+                yield LoopComplete(total_turns=iteration, result=response.text)
                 break
 
             tool_uses = [
@@ -735,9 +761,9 @@ class Agent:
                                 continue
 
                         async for item in self._execute_tool(
-                            tc, execution_cwd=execution_cwd
+                            tc, execution_cwd=execution_cwd, interaction=interaction
                         ):
-                            if isinstance(item, PermissionRequest):
+                            if isinstance(item, (PermissionRequest, UserInputRequest)):
                                 yield item
                             else:
                                 result, elapsed, is_unknown = item
@@ -781,19 +807,20 @@ class Agent:
                             elapsed=elapsed,
                         )
 
+            conversation.add_tool_results_message(tool_results)
             if consecutive_unknown >= 3:
                 yield ErrorEvent(
-                    message="Agent terminated: too many consecutive unknown tool calls"
+                    message="Agent terminated: too many consecutive unknown tool calls", fatal=True
                 )
+                yield LoopComplete(iteration, status="failed")
                 break
 
             exit_plan_called = any(
                 tc.tool_name == "ExitPlanMode" for tc in response.tool_calls
             )
-            conversation.add_tool_results_message(tool_results)
             if exit_plan_called:
                 yield TurnComplete(turn=iteration)
-                yield LoopComplete(total_turns=iteration)
+                yield LoopComplete(total_turns=iteration, result=response.text)
                 break
 
             if self.hook_engine:
@@ -948,7 +975,8 @@ class Agent:
         self,
         tc: ToolCallComplete,
         execution_cwd: str | None = None,
-    ) -> AsyncIterator[tuple[ToolResult, float, bool]]:
+        interaction: Interaction | None = None,
+    ) -> AsyncIterator[PermissionRequest | UserInputRequest | tuple[ToolResult, float, bool]]:
         if execution_cwd is None:
             execution_cwd = self.work_dir
         tool = self.registry.get(tc.tool_name)
@@ -988,16 +1016,18 @@ class Agent:
                 return
 
             if decision.effect == "ask":
-                loop = asyncio.get_running_loop()
-                future: asyncio.Future[PermissionResponse] = loop.create_future()
-                desc = self._build_permission_description(tc)
-                # 向调用方 yield 权限请求事件，由调用方处理
+                if interaction is None:
+                    yield ToolResult("Permission denied: non-interactive agent cannot prompt user", True), 0.0, False
+                    return
+                request_id = interaction.request("permission")
                 yield PermissionRequest(
-                    tool_name=tc.tool_name,
-                    description=desc,
-                    future=future,
+                    tool_name=tc.tool_name, description=self._build_permission_description(tc),
+                    run_id=interaction.run_id, request_id=request_id, tool_id=tc.tool_id,
                 )
-                response = await future
+                try:
+                    response = await interaction.wait(request_id)
+                except TimeoutError:
+                    response = PermissionResponse.DENY
 
                 if response == PermissionResponse.DENY:
                     result = ToolResult(
@@ -1014,6 +1044,27 @@ class Agent:
                     pattern = f"{content[:60]}*" if len(content) > 60 else f"{content}*"
                     rule = Rule(tool_name=tc.tool_name, pattern=pattern, effect="allow")
                     self.permission_checker.rule_engine.append_local_rule(rule)
+
+        if tc.tool_name == "AskUserQuestion" and self.query_source != "fork":
+            from likecc.tools.ask_user import AskUserParams
+            try:
+                params = AskUserParams.model_validate(tc.arguments)
+            except ValidationError as exc:
+                yield ToolResult(f"Parameter validation error: {exc}", True), 0.0, False
+                return
+            if interaction is None:
+                yield ToolResult("Non-interactive agent cannot prompt user", True), 0.0, False
+                return
+            request_id = interaction.request("input")
+            yield UserInputRequest([q.model_dump() for q in params.questions],
+                                   interaction.run_id, request_id, tc.tool_id)
+            try:
+                answers = await interaction.wait(request_id)
+                result = ToolResult("\n".join(f"{q.name}: {answers.get(q.name, '(no answer)')}" for q in params.questions))
+            except TimeoutError:
+                result = ToolResult("User input request timed out", True)
+            yield result, time.monotonic() - start, False
+            return
 
         try:
             result = await self._execute_tool_in_work_dir(
@@ -1108,177 +1159,34 @@ class Agent:
         self, task: str, conversation: ConversationManager | None = None,
         event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
-        env_context = build_environment_context(
-            self.work_dir,
-            self.active_skills,
-            self._skill_catalog,
-            self._agent_catalog,
-        )
+        """Compatibility consumer of run(): return only the terminal answer.
+
+        Intermediate reasoning, tool results and retry fragments are never
+        concatenated into the final answer. Fatal limits are explicit failures.
+        """
         if conversation is None:
             conversation = ConversationManager()
-        self._current_conversation = conversation
-        conversation.inject_environment(env_context)
-        memory_content = self.memory_manager.load() if self.memory_manager else ""
-        conversation.inject_long_term_memory(self.instructions_content, memory_content)
-
         if task:
             conversation.add_user_message(task)
-
-        hook_prompts = (
-            self.hook_engine.get_prompt_messages()
-            if self.hook_engine and self.system_prompt_override is None else None
-        )
-        system = build_system_prompt(
-            hook_prompts=hook_prompts,
-            coordinator_mode=self.coordinator_mode,
-            agent_catalog=self._agent_catalog_list or None,
-        )
-        if self.system_prompt_override is not None:
-            system = self.system_prompt_override
-        self._last_system_prompt = system
-
-        tools = self.registry.get_all_schemas(self.protocol)
-
-        log.info(
-            "[run_to_completion] agent=%s tools=%d names=%s coordinator=%s",
-            self.agent_id,
-            len(tools),
-            [t["name"] for t in tools][:10],
-            self.coordinator_mode,
-        )
-
-        last_text = ""
-
-        for iteration in range(1, self.max_iterations + 1):
-            if self.hook_engine:
-                ctx = self._build_hook_context("turn_start")
-                await self.hook_engine.run_hooks("turn_start", ctx)
-
-            self._consume_mailbox(conversation)
-            if self.notification_fn:
-                for note in self.notification_fn():
-                    conversation.add_system_reminder(note)
-
-            compact_result = await auto_compact(
-                conversation,
-                self.client,
-                self.context_window,
-                self.session_dir,
-                protocol=self.protocol,
-                breaker=self.compact_breaker,
-                recovery=self.recovery_state,
-                tool_schemas=self.registry.get_all_schemas(self.protocol),
-                transcript_path=self._transcript_path,
-            )
-            if isinstance(compact_result, CompactEvent):
-                env_context = build_environment_context(
-                    self.work_dir,
-                    self.active_skills,
-                    self._skill_catalog,
-                    self._agent_catalog,
-                )
-                conversation.inject_environment(env_context)
-
-            deferred_names = self.registry.get_deferred_tool_names()
-            if deferred_names:
-                conversation.add_system_reminder(
-                    "The following deferred tools are available via ToolSearch. "
-                    "Their schemas are NOT loaded - use ToolSearch with "
-                    'query "select:<name>[,<name>...]" to load tool schemas before calling them:\n'
-                    + "\n".join(deferred_names)
-                )
-
-            api_conv, _new_records = apply_tool_result_budget(
-                conversation, self.session_dir, self.replacement_state
-            )
-            if _new_records:
-                append_replacement_records(self.session_dir, _new_records)
-
-            # ToolSearch may have discovered deferred tools in the previous
-            # iteration, so schemas must be refreshed before every request.
-            tools = self.registry.get_all_schemas(self.protocol)
-            collector = StreamCollector()
-            llm_stream = self.client.stream(api_conv, system=system, tools=tools)
-            async for _event in collector.consume(llm_stream):
-                pass
-
-            response = collector.response
-            self.total_input_tokens += response.input_tokens
-            self.total_output_tokens += response.output_tokens
-
-            if event_callback:
-                event_callback({
-                    "type": "usage",
-                    "usage": {
-                        "inputTokens": self.total_input_tokens,
-                        "outputTokens": self.total_output_tokens,
-                    },
-                })
-
-            if response.text:
-                last_text = response.text
+        result = ""
+        status = "completed"
+        async with aclosing(self.run(conversation)) as events:
+            async for event in events:
                 if event_callback:
-                    event_callback({
-                        "type": "stream_text",
-                        "text": response.text,
-                    })
-
-            log.info(
-                "[run_to_completion] agent=%s iter=%d tool_calls=%d text_len=%d stop=%s",
-                self.agent_id, iteration, len(response.tool_calls),
-                len(response.text), response.stop_reason,
-            )
-
-            if not response.tool_calls:
-                conversation.add_assistant_message(response.text)
-                if self.file_history is not None:
-                    summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
-                    self.file_history.make_snapshot(len(conversation.history), summary)
-                break
-
-            tool_uses = [
-                ToolUseBlock(
-                    tool_use_id=tc.tool_id,
-                    tool_name=tc.tool_name,
-                    arguments=tc.arguments,
-                )
-                for tc in response.tool_calls
-            ]
-            conversation.add_assistant_message(response.text, tool_uses)
-            # assistant 回复已在历史中，锚定实际用量；下一轮迭代只需对
-            # 下方追加的 tool results 做字符估算。
-            conversation.record_usage_anchor(
-                response.input_tokens,
-                response.output_tokens,
-                response.cache_read,
-                response.cache_creation,
-            )
-
-            tool_results: list[ToolResultBlock] = []
-            for tc in response.tool_calls:
-                if event_callback:
-                    event_callback({
-                        "type": "tool_use",
-                        "toolName": tc.tool_name,
-                        "args": tc.arguments,
-                    })
-                result = await self._execute_tool_noninteractive(tc)
-                content = self._maybe_persist_or_truncate(tc.tool_id, result.output)
-                tool_results.append(
-                    ToolResultBlock(
-                        tool_use_id=tc.tool_id,
-                        content=content,
-                        is_error=result.is_error,
-                    )
-                )
-
-            conversation.add_tool_results_message(tool_results)
-
-            if self.hook_engine:
-                ctx = self._build_hook_context("turn_end")
-                await self.hook_engine.run_hooks("turn_end", ctx)
-
-        return last_text
+                    if isinstance(event, UsageEvent):
+                        event_callback({"type": "usage", "usage": {
+                            "inputTokens": event.input_tokens, "outputTokens": event.output_tokens,
+                        }})
+                    elif isinstance(event, StreamText):
+                        event_callback({"type": "stream_text", "text": event.text})
+                    elif isinstance(event, ToolUseEvent):
+                        event_callback({"type": "tool_use", "toolName": event.tool_name, "args": event.arguments})
+                if isinstance(event, LoopComplete):
+                    status = event.status
+                    result = event.result
+        if status != "completed":
+            raise RuntimeError(f"Agent run ended with status: {status}")
+        return result
 
     async def _execute_tool_noninteractive(
         self, tc: ToolCallComplete
@@ -1316,35 +1224,10 @@ class Agent:
                     is_error=True,
                 )
 
-        if self.permission_checker:
-            decision = self._check_tool_permission(tool, tc.arguments, execution_cwd)
-            assert decision is not None
-            if decision.effect == "deny":
-                return ToolResult(
-                    output=f"Permission denied: {decision.reason}",
-                    is_error=True,
-                )
-            if decision.effect == "ask":
-                if self.permission_mode == PermissionMode.DONT_ASK:
-                    pass  # 自动批准
-                else:
-                    return ToolResult(
-                        output="Permission denied: non-interactive agent cannot prompt user",
-                        is_error=True,
-                    )
-
-        try:
-            result = await self._execute_tool_in_work_dir(
-                tool, tc.arguments, execution_cwd
-            )
-        except ValidationError as e:
-            result = ToolResult(
-                output=f"Parameter validation error: {e}", is_error=True
-            )
-        except Exception as e:
-            result = ToolResult(
-                output=f"Tool execution error: {e}", is_error=True
-            )
+        result = None
+        async for item in self._execute_tool(tc, execution_cwd=execution_cwd):
+            result, _, _ = item
+        assert result is not None
 
         if self.hook_engine:
             file_path = self._infer_file_path(tc.arguments)

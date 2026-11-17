@@ -5,6 +5,8 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import Static
+from rich.markup import escape
+from rich.text import Text
 
 
 class InlineAskUserWidget(Vertical, can_focus=True):
@@ -44,7 +46,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
 
 
     def compose(self) -> ComposeResult:
-        yield Static(self._build_content(), id="askuser-content")
+        yield Static(Text.from_markup(self._build_content()), id="askuser-content")
 
     def on_mount(self) -> None:
         self.focus()
@@ -68,10 +70,10 @@ class InlineAskUserWidget(Vertical, can_focus=True):
 
         q = self._questions[self._q_idx]
         header = q.get("question", q.get("message", f"Question {self._q_idx + 1}"))
-        lines.append(f" [bold color(99)]{header}[/]\n")
+        lines.append(f" [bold color(99)]{escape(header)}[/]\n")
 
         options = q.get("options", [])
-        is_multi = q.get("multiSelect", False)
+        is_multi = q.get("multiSelect", q.get("type") == "checkbox")
         cursor = self._cursors[self._q_idx]
 
         for i, opt in enumerate(options):
@@ -87,8 +89,8 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             else:
                 check = ""
 
-            desc_part = f" — [dim]{desc}[/]" if desc else ""
-            lines.append(f"{prefix}{check}{bold}{label}{end_bold}{desc_part}")
+            desc_part = f" — [dim]{escape(desc)}[/]" if desc else ""
+            lines.append(f"{prefix}{check}{bold}{escape(label)}{end_bold}{desc_part}")
 
         # "Other" 选项
         other_idx = len(options)
@@ -99,7 +101,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
 
         if cursor == other_idx:
             text = self._others[self._q_idx]
-            display = text if text else "[dim]Type your answer here...[/]"
+            display = escape(text) if text else "[dim]Type your answer here...[/]"
             lines.append(f"      {display}█")
 
         if is_multi:
@@ -112,7 +114,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
     def _render_nav_bar(self) -> str:
         parts = []
         for i, q in enumerate(self._questions):
-            header = q.get("header", f"Q{i+1}")
+            header = escape(q.get("header", f"Q{i+1}"))
             check = "☑" if i in self._answered else "☐"
             if i == self._q_idx and not self._on_submit:
                 parts.append(f"[bold reverse] {header} {check} [/]")
@@ -127,10 +129,10 @@ class InlineAskUserWidget(Vertical, can_focus=True):
     def _render_submit(self) -> str:
         lines = ["\n [bold color(99)]Review your answers:[/]\n"]
         for i, q in enumerate(self._questions):
-            header = q.get("header", q.get("question", f"Q{i+1}"))
+            header = escape(q.get("header", q.get("question", q.get("message", f"Q{i+1}"))))
             ans = self._answered.get(i, "")
             if ans:
-                lines.append(f"   {header}: {ans}")
+                lines.append(f"   {header}: {escape(ans)}")
             else:
                 lines.append(f"   {header}: [dim](not answered)[/]")
         lines.append("")
@@ -142,13 +144,13 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         return "\n".join(lines)
 
     def _refresh(self) -> None:
-        self.query_one("#askuser-content", Static).update(self._build_content())
+        self.query_one("#askuser-content", Static).update(Text.from_markup(self._build_content()))
 
     def _save_current_answer(self) -> None:
         q = self._questions[self._q_idx]
         options = q.get("options", [])
         cursor = self._cursors[self._q_idx]
-        is_multi = q.get("multiSelect", False)
+        is_multi = q.get("multiSelect", q.get("type") == "checkbox")
 
         if cursor == len(options):  # "Other"（自定义输入）
             self._answered[self._q_idx] = self._others[self._q_idx] or "Other"
@@ -211,7 +213,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         if self._on_submit:
             return
         q = self._questions[self._q_idx]
-        if not q.get("multiSelect", False):
+        if not q.get("multiSelect", q.get("type") == "checkbox"):
             return
         cursor = self._cursors[self._q_idx]
         options = q.get("options", [])
@@ -224,7 +226,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             if self._submit_idx == 0:
                 answers = {}
                 for i, q in enumerate(self._questions):
-                    key = q.get("question", q.get("message", f"q{i}"))
+                    key = q.get("name", q.get("question", q.get("message", f"q{i}")))
                     answers[key] = self._answered.get(i, "")
                 self.post_message(self.Responded(answers))
             else:
@@ -234,7 +236,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             if len(self._questions) == 1:
                 answers = {}
                 q = self._questions[0]
-                key = q.get("question", q.get("message", "q0"))
+                key = q.get("name", q.get("question", q.get("message", "q0")))
                 answers[key] = self._answered.get(0, "")
                 self.post_message(self.Responded(answers))
             elif self._q_idx < len(self._questions) - 1:

@@ -44,6 +44,10 @@ class ToolRegistry:
     def is_discovered(self, name: str) -> bool:
         return name in self._discovered
 
+    def clear_discovered(self) -> None:
+        """Start a new conversation without carrying prior tool discovery."""
+        self._discovered.clear()
+
 
     def get_deferred_tool_names(self) -> list[str]:
         return [

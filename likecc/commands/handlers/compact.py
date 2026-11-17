@@ -23,7 +23,9 @@ async def handle_compact(ctx: CommandContext) -> None:
         # 持久化 compact_boundary，使后续 resume 可重建压缩后的状态。
         # manual_compact 已重写了 ctx.conversation；下一次 _send_message
         # 会重新捕获 history_cursor，所以这里无需手动重置。
-        if ctx.session is not None and result.boundary is not None:
+        if ctx.config.get("service"):
+            ctx.config["service"].record_compact(result)
+        elif ctx.session is not None and result.boundary is not None:
             from likecc.memory.session import make_compact_boundary
 
             ctx.session.append_record(

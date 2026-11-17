@@ -1,7 +1,7 @@
 """UI-independent assembly and ownership of one Agent runtime.
 
-The caller owns the execution loop and borrowed HookEngine. TUI-only memory,
-sessions, skills and MCP connections stay with the entry adapter in R1.
+R2 adds one leased SessionService and optional RuntimeExtensions. A borrowed
+HookEngine remains owned by the entry; an extension-created engine is owned here.
 """
 from __future__ import annotations
 
@@ -60,12 +60,14 @@ class Runtime:
         self, *, config: AppConfig, work_dir: str | Path,
         permission_mode: PermissionMode, hook_engine: HookEngine | None = None,
         cache_files: bool = False,
+        client_factory: Callable | None = None,
     ) -> None:
         self.config = deepcopy(config)
         self.work_dir = str(Path(work_dir).resolve())
         self.permission_mode = permission_mode
         self.hook_engine = hook_engine  # borrowed; never started/closed here
         self.file_cache = FileCache() if cache_files else None
+        self._client_factory = client_factory
         self.registry = create_default_registry(file_cache=self.file_cache)
         self.task_manager = tasks.TaskManager()
         self.trace_manager = TraceManager()
@@ -81,6 +83,8 @@ class Runtime:
         self._initializing = False
         self._close_task: asyncio.Task | None = None
         self._stop_task: asyncio.Task | None = None
+        self.service = None
+        self.extensions = None
 
     @property
     def closed(self) -> bool:
@@ -93,7 +97,7 @@ class Runtime:
         self._initializing = True
         self.provider = deepcopy(provider)
         try:
-            self.client = clients.create_client(self.provider)
+            self.client = (self._client_factory or clients.create_client)(self.provider)
             if resolve_context:
                 await clients.resolve_context_window(self.provider)
             home = Path.home()
@@ -197,7 +201,12 @@ class Runtime:
 
     async def _close(self) -> None:
         # Each stage is attempted even when a preceding resource cannot close.
-        closers = [self.stop_background]
+        closers = []
+        if self.service is not None:
+            closers.append(self.service.aclose)
+        closers.append(self.stop_background)
+        if self.extensions is not None:
+            closers.append(self.extensions.aclose)
         if self._agent_tool is not None:
             closers.append(self._agent_tool.aclose)
         if self.client is not None:

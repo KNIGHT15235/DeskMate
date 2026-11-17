@@ -61,16 +61,15 @@ async def handle_session(ctx: CommandContext) -> None:
             idx = int(session_id) - 1
             if 0 <= idx < len(candidates):
                 session_id = candidates[idx]
-        result = sm.resume(session_id)
+        service = ctx.config.get("service")
+        result = service.resume(session_id) if service else sm.resume(session_id)
         if result is None:
             ctx.ui.add_system_message(f"会话未找到: {session_id}")
             return
-        if ctx.session:
+        if ctx.session and not service:
             ctx.session.close()
         ctx.config["set_session"](result.session)
-        conv = ConversationManager()
-        for msg in result.messages:
-            conv.history.append(msg)
+        conv = service.conversation if service else ConversationManager(history=result.messages)
         ctx.config["set_conversation"](conv)
         if ctx.agent:
             ctx.agent._loop_count = 0
@@ -81,11 +80,12 @@ async def handle_session(ctx: CommandContext) -> None:
 
 
     elif sub == "new":
-        if ctx.session:
+        service = ctx.config.get("service")
+        if ctx.session and not service:
             ctx.session.close()
-        new_session = sm.create()
+        new_session = service.new_session() if service else sm.create()
         ctx.config["set_session"](new_session)
-        ctx.config["set_conversation"](ConversationManager())
+        ctx.config["set_conversation"](service.conversation if service else ConversationManager())
         if ctx.agent:
             ctx.agent._loop_count = 0
         ctx.config["clear_chat"]()

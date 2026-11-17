@@ -6,6 +6,15 @@ from likecc.conversation import ConversationManager
 
 
 async def handle_clear(ctx: CommandContext) -> None:
+    service = ctx.config.get("service")
+    if service:
+        session = service.new_session()
+        ctx.config["set_session"](session)
+        ctx.config["set_conversation"](service.conversation)
+        ctx.config["clear_chat"]()
+        ctx.ui.refresh_status()
+        ctx.ui.add_system_message("对话已清除，新会话已创建")
+        return
     if ctx.session:
         ctx.session.close()
 

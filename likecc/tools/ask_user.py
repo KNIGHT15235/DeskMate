@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 from likecc.tools.base import Tool, ToolResult
@@ -20,20 +17,8 @@ class QuestionItem(BaseModel):
 
 class AskUserParams(BaseModel):
     questions: list[QuestionItem] = Field(
-        description="List of questions to ask the user"
+        description="List of questions to ask the user", min_length=1,
     )
-
-
-class AskUserEvent:
-
-
-    def __init__(
-        self,
-        questions: list[dict[str, Any]],
-        future: asyncio.Future[dict[str, str]],
-    ) -> None:
-        self.questions = questions
-        self.future = future
 
 
 class AskUserTool(Tool):
@@ -50,29 +35,7 @@ class AskUserTool(Tool):
     should_defer = True
 
 
-    def __init__(self) -> None:
-        self._pending_event: AskUserEvent | None = None
-
     async def execute(self, params: AskUserParams) -> ToolResult:
-        questions_data = [q.model_dump() for q in params.questions]
-
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[dict[str, str]] = loop.create_future()
-
-        self._pending_event = AskUserEvent(questions=questions_data, future=future)
-
-        try:
-            answers = await asyncio.wait_for(future, timeout=300)
-        except asyncio.TimeoutError:
-            return ToolResult(
-                output="User did not respond within 5 minutes", is_error=True
-            )
-        finally:
-            self._pending_event = None
-
-        lines = []
-        for q in params.questions:
-            answer = answers.get(q.name, "(no answer)")
-            lines.append(f"{q.name}: {answer}")
-
-        return ToolResult(output="\n".join(lines))
+        # Agent publishes UserInputRequest before waiting on its run-scoped
+        # Interaction. Direct invocation has no event/reply channel.
+        return ToolResult(output="User input requires an interactive run", is_error=True)

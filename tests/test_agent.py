@@ -444,11 +444,13 @@ async def test_plan_mode_denied_tool_returns_error():
 
     events = []
     permission_requests = []
-    async for e in agent.run(conv):
+    from likecc.interaction import Interaction
+    interaction = Interaction()
+    async for e in agent.run(conv, interaction=interaction):
         events.append(e)
         if isinstance(e, PermissionRequest):
             permission_requests.append(e)
-            e.future.set_result(PermissionResponse.DENY)
+            assert interaction.reply(e.run_id, e.request_id, PermissionResponse.DENY)
 
     c = _collect(events)
     assert len(c["tool_result"]) == 1

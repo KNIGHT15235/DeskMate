@@ -37,6 +37,7 @@ class RecordType(str, Enum):
     # 包含摘要文本和原样保留的 keep 尾部（以序列化 record 形式内联），
     # 使 resume 可以仅凭此标记重建压缩后的状态，无需重放标记之前的原始前缀。
     COMPACT_BOUNDARY = "compact_boundary"
+    RUN_STATE = "run_state"  # audit only; never becomes a model message
 
 
 @dataclass
@@ -239,7 +240,8 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
             # 权威的那一条；但在此展开可以保证 records_to_messages 对任何
             # 直接调用者都保持自洽。
             summary, keep_messages = parse_compact_boundary(record)
-            messages.append(Message(role="user", content="本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n" + summary))
+            if summary:
+                messages.append(Message(role="user", content="本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n" + summary))
             messages.extend(keep_messages)
             continue
 
@@ -411,6 +413,7 @@ class ResumeResult:
     session: Session
     messages: list[Message]
     last_active: datetime
+    recovered_tail: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +556,7 @@ class SessionManager:
             records = records[last_boundary:]
 
         valid_count = validate_message_chain(records)
+        recovered_tail = valid_count < len(records)
         records = records[:valid_count]
         messages = records_to_messages(records)
 
@@ -568,6 +572,7 @@ class SessionManager:
             session=session,
             messages=messages,
             last_active=meta.last_active,
+            recovered_tail=recovered_tail,
         )
 
     def delete(self, session_id: str) -> bool:

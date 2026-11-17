@@ -125,7 +125,7 @@ async def _run_prompt_with_hook_cleanup(
 
 async def _run_prompt(config, permission_mode, hook_engine, prompt: str,
                       *, work_dir: str | None = None) -> None:
-    from likecc.conversation import ConversationManager
+    from likecc.service import SessionService
     from likecc.runtime import Runtime
 
     runtime = Runtime(
@@ -152,8 +152,9 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str,
 
         agent.notification_fn = drain_notifications
 
-        conv = ConversationManager()
-        last_result = await agent.run_to_completion(prompt, conv)
+        service = SessionService(runtime)
+        conv = service.conversation
+        last_result = await service.run_to_completion(prompt)
         print(last_result, flush=True)
 
         # Ordinary background sub-agents need the same delivery loop as team
@@ -164,9 +165,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str,
                 if notes:
                     for note in notes:
                         conv.add_system_reminder(note)
-                    last_result = await agent.run_to_completion(
-                        "Background agent notifications received. Process them and continue.",
-                        conv,
+                    last_result = await service.run_to_completion(
+                        "Background agent notifications received. Process them and continue."
                     )
                     print(last_result, flush=True)
                     await asyncio.sleep(0)

@@ -705,10 +705,12 @@ async def test_e2e_default_mode_write_triggers_ask():
     conv.add_user_message("Write a file")
 
     events = []
-    async for e in agent.run(conv):
+    from likecc.interaction import Interaction
+    interaction = Interaction()
+    async for e in agent.run(conv, interaction=interaction):
         if isinstance(e, PermissionRequest):
             events.append(e)
-            e.future.set_result(PermissionResponse.ALLOW)
+            assert interaction.reply(e.run_id, e.request_id, PermissionResponse.ALLOW)
         else:
             events.append(e)
 
@@ -820,10 +822,12 @@ async def test_e2e_user_denies_operation():
     conv.add_user_message("Install something")
 
     events = []
-    async for e in agent.run(conv):
+    from likecc.interaction import Interaction
+    interaction = Interaction()
+    async for e in agent.run(conv, interaction=interaction):
         if isinstance(e, PermissionRequest):
             events.append(e)
-            e.future.set_result(PermissionResponse.DENY)
+            assert interaction.reply(e.run_id, e.request_id, PermissionResponse.DENY)
         else:
             events.append(e)
 

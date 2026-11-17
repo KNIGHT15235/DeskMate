@@ -21,7 +21,6 @@ from likecc.agent import (
     HookEvent,
     LoopComplete,
     PermissionRequest,
-    PermissionResponse,
     RetryEvent,
     StreamText,
     ThinkingText,
@@ -33,8 +32,6 @@ from likecc.agent import (
 from likecc.client import (
     AuthenticationError,
     LLMClient,
-    LLMError,
-    create_client,
     resolve_context_window,
 )
 from likecc.commands import (
@@ -47,6 +44,10 @@ from likecc.commands.completion import CompletionPopup
 from likecc.commands.handlers import register_all_commands
 from likecc.config import AppConfig, MCPServerConfig, ProviderConfig, WorktreeConfig
 from likecc.runtime import Runtime, finish_cleanup
+from likecc.service import SessionService
+from likecc.extensions import RuntimeExtensions, ExtensionOptions
+from likecc.interaction import UserInputRequest
+from contextlib import aclosing
 from likecc.hooks import HookContext, HookEngine
 from likecc.conversation import ConversationManager, Message
 from likecc.mcp import MCPManager
@@ -54,10 +55,6 @@ from likecc.memory import (
     MemoryManager,
     Session,
     SessionManager,
-    find_relevant_memories,
-    generate_session_summary,
-    make_compact_boundary,
-    render_reminder,
 )
 from likecc.permissions import PermissionMode
 from likecc.agents.loader import AgentLoader
@@ -71,9 +68,7 @@ from likecc.commands.handlers.skill_register import register_skill_commands
 from rich.text import Text as RichText
 from textual.theme import Theme
 from likecc.tools import ToolRegistry
-from likecc.tools.ask_user import AskUserEvent, AskUserTool
 from likecc.tools.load_skill import LoadSkill
-from likecc.worktree.cleanup import start_stale_cleanup_task
 from likecc.worktree.manager import WorktreeManager
 from likecc.commands.handlers.worktree import create_worktree_command
 from likecc.teammate_tree import TeammateTree
@@ -581,18 +576,19 @@ class LikeCCApp(App):
         self._enable_coordinator_mode = enable_coordinator_mode
         self._work_dir = str(Path(work_dir or Path.cwd()).resolve())
         self._runtime_config = AppConfig(
-            providers=providers, permission_mode=permission_mode.value,
+            providers=providers, permission_mode=permission_mode.value, mcp_servers=self._mcp_server_configs,
             enable_fork=enable_fork, enable_verification_agent=enable_verification_agent,
             worktree=worktree_config or WorktreeConfig(), teammate_mode=teammate_mode,
             enable_coordinator_mode=enable_coordinator_mode,
         )
         self.runtime = self._new_runtime()
         self.file_cache = self.runtime.file_cache
+        self.service: SessionService | None = None
+        self._run_handle = None
         self.client: LLMClient | None = None
         self.conversation = ConversationManager()
         self.registry: ToolRegistry = self.runtime.registry
         self.agent: Agent | None = None
-        self.mcp_manager: MCPManager | None = None
         self._mcp_init_task: asyncio.Task[None] | None = None
         self._selected_provider: ProviderConfig | None = None
         self._streaming = False
@@ -619,12 +615,9 @@ class LikeCCApp(App):
         self.trace_manager: TraceManager = self.runtime.trace_manager
         self._notification_check_task: asyncio.Task[None] | None = None
         self.worktree_manager: WorktreeManager | None = None
-        self._stale_cleanup_task: asyncio.Task[None] | None = None
         self._current_streaming_label: Static | None = None
         self._current_ai_row: Vertical | None = None
         self._current_accumulated_text: str = ""
-        self._mcp_instructions: str = ""
-        self._mcp_instructions_ok: bool = False
         self._mcp_connecting: bool = False
         self._teammate_tree: TeammateTree | None = None
         self._teammate_timer = None
@@ -638,7 +631,6 @@ class LikeCCApp(App):
         self._entry_tasks: set[asyncio.Task] = set()
         self._closing = False
         self._mcp_ready = asyncio.Event()
-        self._mcp_stop = asyncio.Event()
 
     def _new_runtime(self) -> Runtime:
         return Runtime(
@@ -718,100 +710,50 @@ class LikeCCApp(App):
             self.task_manager = self.runtime.task_manager
             self.trace_manager = self.runtime.trace_manager
         # Preserve TUI schema order: LoadSkill precedes ToolSearch.
-        self._load_skill_tool = LoadSkill()
-        self.registry.register(self._load_skill_tool)
+        self.extensions = RuntimeExtensions(self.runtime, ExtensionOptions(
+            skills=True, interactive_tools=True, mcp=True, stale_cleanup=True,
+        ), mcp_factory=MCPManager)
+        self._load_skill_tool = self.extensions.load_skill
         try:
             await self.runtime.initialize(provider)
         except AuthenticationError as e:
             self._show_error(str(e))
             return
         try:
-            self._configure_interactive_runtime()
+            await self._configure_interactive_runtime()
         except BaseException:
             await self._close_resources(run_shutdown_hook=False)
             raise
 
-    def _configure_interactive_runtime(self) -> None:
+    async def _configure_interactive_runtime(self) -> None:
         provider = self.runtime.provider
         self._selected_provider = provider
         self.client = self.runtime.client
         self.agent = self.runtime.agent
         work_dir = self._work_dir
         self._instructions_content = self.agent.instructions_content
-        self.memory_manager = MemoryManager(work_dir)
-        self.session_manager = SessionManager(work_dir)
-        self.session_manager.cleanup()
-        self.session = self.session_manager.create()
-
-        from likecc.filehistory import FileHistory
-        self.file_history = FileHistory(work_dir, self.session.session_id)
-        for tool in self.registry.list_tools():
-            if hasattr(tool, "file_history"):
-                tool.file_history = self.file_history
-
-        load_skill_tool = self._load_skill_tool
-
-        self.registry.register(AskUserTool())
-
-        from likecc.tools.exit_plan_mode import ExitPlanModeTool
-        self._exit_plan_tool = ExitPlanModeTool()
-        self.registry.register(self._exit_plan_tool)
-
-        self.agent.memory_manager = self.memory_manager
-        self.agent.file_history = self.file_history
-        self.agent.session_id = self.session.session_id
-
-        self._exit_plan_tool._is_plan_mode = lambda: self.agent.plan_mode
-        self._exit_plan_tool._plan_exists = lambda: self.agent._get_plan_path().exists()
-
-        # Layer 2: 在后台异步拉取模型的 context window，不阻塞启动流程。
-        # agent 已经有一个同步解析的窗口值（来自配置 / 映射表 / 默认值）；
-        # 如果异步拉取成功，就原地升级为更准确的值。
+        self.service = SessionService(self.runtime, persistent=True, memory=True,
+                                      summaries=True, cleanup_sessions=True)
+        self.session_manager = self.service.session_manager
+        self.memory_manager = self.service.memory_manager
+        self.session = self.service.session
+        self.conversation = self.service.conversation
+        self.file_history = self.service.file_history
         self._context_window_task = self._spawn_task(
             self._resolve_context_window(provider), name="context-window"
         )
-
-        self.skill_loader = SkillLoader(work_dir)
-        self.skill_loader.load_all()
-
-        load_skill_tool.set_loader(self.skill_loader)
-        load_skill_tool.set_agent(self.agent)
-
-        self.skill_executor = SkillExecutor(
-            agent=self.agent,
-            client=self.client,
-            protocol=provider.protocol,
-        )
-
-        catalog = self.skill_loader.get_catalog()
-        if catalog:
-            lines = [
-                "You can use the following Skills:",
-                "",
-            ]
-            for name, desc in catalog:
-                lines.append(f"- {name}: {desc}")
-            lines.append("")
-            lines.append(
-                "If the user's request matches a Skill, call LoadSkill to activate it."
-            )
-            self.agent.set_skill_catalog("\n".join(lines))
-
-        register_skill_commands(
-            self.command_registry, self.skill_loader, self.skill_executor
-        )
-
         self.runtime.assemble_delegation(
             interactive=True, on_work_dir_change=self._sync_worktree_context,
         )
         self.worktree_manager = self.runtime.worktree_manager
         self.agent_loader = self.runtime.agent_loader
         self.team_manager = self.runtime.team_manager
-        wt_cfg = self.runtime.config.worktree or WorktreeConfig()
         self.command_registry.register_sync(create_worktree_command(self.worktree_manager))
-        self._stale_cleanup_task = self._spawn_task(start_stale_cleanup_task(
-            self.worktree_manager, wt_cfg.stale_cleanup_interval, wt_cfg.stale_cutoff_hours,
-        ))
+        await self.extensions.initialize()
+        self.skill_loader = self.extensions.skill_loader
+        self.skill_executor = self.extensions.skill_executor
+        self._exit_plan_tool = self.extensions.exit_plan
+        register_skill_commands(self.command_registry, self.skill_loader, self.skill_executor)
 
         agent_catalog = self.agent_loader.list_agents()
         if agent_catalog:
@@ -846,10 +788,6 @@ class LikeCCApp(App):
         trace_cmd = create_trace_command(self.trace_manager, self.agent.agent_id)
         self.command_registry.register_sync(trace_cmd)
 
-        # --- 协调者模式初始化（工具已注册，激活推迟到 TeamCreate 时） ---
-        from likecc.tools.synthetic_output import SyntheticOutputTool
-
-        self.registry.register(SyntheticOutputTool())
         self.agent._team_manager = self.team_manager
 
         if self.hook_engine:
@@ -868,8 +806,10 @@ class LikeCCApp(App):
                 name="hook-startup",
             )
 
+        self._mcp_ready = self.extensions.ready
+        self._mcp_init_task = self.extensions._mcp_task
         if self._mcp_server_configs:
-            self._mcp_init_task = asyncio.create_task(self._serve_mcp(), name="mcp-lifetime")
+            self._spawn_task(self._show_mcp_status())
 
         self.query_one("#model-label", Static).update(provider.model)
         work_dir = self._work_dir
@@ -954,6 +894,7 @@ class LikeCCApp(App):
             memory_manager=self.memory_manager,
             ui=self,
             config={
+                "service": self.service,
                 "registry": self.command_registry,
                 "set_session": self._set_session,
                 "set_conversation": self._set_conversation,
@@ -966,26 +907,19 @@ class LikeCCApp(App):
 
     def _set_session(self, session: Session) -> None:
         self.session = session
+        if self.service:
+            self.file_history = self.service.file_history
         if self.agent:
             self.agent.session_id = session.session_id
 
     def _persist_compact_boundary(self, notification: CompactNotification) -> None:
-        """Layer-2 compact 后写入 compact_boundary 记录。
-
-        将摘要 + 原样保留的尾部内联到一条记录中，resume 时只需这一条
-        就能重建压缩后的状态。之前已写入磁盘的原始前缀不会被重放。
-        没有活跃 session 或 compact 未产出 boundary 时直接跳过。
-        """
-        if not self.session or notification.boundary is None:
-            return
-        record = make_compact_boundary(
-            notification.boundary.summary,
-            notification.boundary.keep,
-        )
-        self.session.append_record(record)
+        if self.service:
+            self.service.record_compact(notification)
 
     def _set_conversation(self, conv: ConversationManager) -> None:
         self.conversation = conv
+        if self.service:
+            self.service.conversation = conv
 
     def _clear_chat(self) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)
@@ -1143,53 +1077,6 @@ class LikeCCApp(App):
                     return
             self._agent_task.cancel()
 
-    async def _prefetch_relevant_memories(self, query: str) -> str:
-        """Run the recall selector as a side-query with an 8s timeout.
-
-        Creates a fresh LLM client so the selector's system prompt is
-        independent of the main conversation's system prompt. Returns the
-        rendered system-reminder body, or "" on any failure / timeout.
-        """
-        if self.memory_manager is None or self._selected_provider is None:
-            return ""
-
-        provider = self._selected_provider
-        user_dir = self.memory_manager.user_mem_dir
-        project_dir = self.memory_manager.project_mem_dir
-
-        async def selector(system_prompt: str, user_message: str) -> str:
-            from likecc.tools.base import StreamEnd, TextDelta
-
-            side_client = create_client(provider)
-            try:
-                mini_conv = ConversationManager()
-                mini_conv.history = [Message(role="user", content=user_message)]
-                collected = ""
-                async for event in side_client.stream(mini_conv, system=system_prompt):
-                    if isinstance(event, TextDelta):
-                        collected += event.text
-                    elif isinstance(event, StreamEnd):
-                        pass
-                return collected
-            finally:
-                await side_client.aclose()
-
-        try:
-            results = await asyncio.wait_for(
-                find_relevant_memories(
-                    query=query,
-                    user_mem_dir=user_dir,
-                    project_mem_dir=project_dir,
-                    recent_tools=None,
-                    already_surfaced=None,
-                    selector=selector,
-                ),
-                timeout=8.0,
-            )
-            return render_reminder(results)
-        except (asyncio.TimeoutError, Exception):
-            return ""
-
     async def _send_message(self, text: str, is_notification: bool = False) -> None:
         assert self.agent is not None
 
@@ -1204,11 +1091,6 @@ class LikeCCApp(App):
         if text and "@" in text:
             text = expand_at_refs(text, self.agent.work_dir)
 
-        # Start memory recall prefetch before UI work.
-        prefetch_task = self._spawn_task(
-            self._prefetch_relevant_memories(text)
-        ) if text else None
-
         if text:
             user_row = Vertical(classes="user-row")
             await chat.mount(user_row)
@@ -1220,25 +1102,6 @@ class LikeCCApp(App):
             await user_row.mount(user_bubble)
             self.call_after_refresh(chat.scroll_end, animate=False)
 
-            self.conversation.add_user_message(text)
-            if self.session:
-                self.session.append(Message(role="user", content=text))
-
-        if self._mcp_instructions and not self._mcp_instructions_ok:
-            self.conversation.add_system_reminder(self._mcp_instructions)
-            self._mcp_instructions_ok = True
-
-        # Collect prefetched recall with 3s timeout, inject as system-reminder.
-        if prefetch_task is not None:
-            try:
-                reminder = await asyncio.wait_for(prefetch_task, timeout=3.0)
-                if reminder:
-                    self.conversation.add_system_reminder(reminder)
-            except (asyncio.TimeoutError, Exception):
-                pass
-
-        history_cursor = len(self.conversation.history)
-
         # 准备 AI 回复区域
         ai_row = Vertical(classes="ai-row")
         await chat.mount(ai_row)
@@ -1246,6 +1109,7 @@ class LikeCCApp(App):
         await ai_row.mount(streaming_label)
 
         accumulated_text = ""
+        failure_displayed = False
         tool_blocks: dict[str, ToolCallBlock] = {}
 
         # 在聊天区底部启动持续旋转的加载动画
@@ -1270,144 +1134,124 @@ class LikeCCApp(App):
         await asyncio.sleep(0)
 
         try:
-            async for event in self.agent.run(self.conversation):
-                if isinstance(event, ThinkingText):
-                    self.call_after_refresh(chat.scroll_end, animate=False)
+            self._run_handle = self.service.start(text, interactive=True)
+            async with self._run_handle as run, aclosing(run.events()) as events:
+                async for envelope in events:
+                    event = envelope.event
+                    if isinstance(event, ThinkingText):
+                        self.call_after_refresh(chat.scroll_end, animate=False)
 
-                elif isinstance(event, StreamText):
-                    if streaming_label is not None and not accumulated_text:
-                        await streaming_label.remove()
+                    elif isinstance(event, StreamText):
+                        if streaming_label is not None and not accumulated_text:
+                            await streaming_label.remove()
+                            streaming_label = Static("", classes="message ai-message")
+                            await ai_row.mount(streaming_label)
+                        accumulated_text += event.text
+                        from rich.text import Text as RichText
+                        t = RichText()
+                        t.append("● ", style="bold color(99)")
+                        t.append(accumulated_text)
+                        streaming_label.update(t)
+                        self.call_after_refresh(chat.scroll_end, animate=False)
+
+                    elif isinstance(event, RetryEvent):
+                        self._show_system_message(f"↻ Retrying: {event.reason}")
+
+                    elif isinstance(event, ToolUseEvent):
+                        if accumulated_text:
+                            if streaming_label is not None:
+                                await streaming_label.remove()
+                            from rich.text import Text as RichText
+                            prefix = Static(RichText("●  ", style="bold color(99)"), classes="message")
+                            await ai_row.mount(prefix)
+                            md = Markdown(accumulated_text, classes="message ai-message")
+                            await ai_row.mount(md)
+                            streaming_label = None
+                            accumulated_text = ""
+                        elif streaming_label is not None:
+                            await streaming_label.remove()
+                            streaming_label = None
+
+                        if _is_subagent_tool(event.tool_name):
+                            agent_type = event.arguments.get("subagent_type", "")
+                            desc = event.arguments.get("description", "")
+                            block = SubAgentBlock(
+                                agent_type or "agent",
+                                desc,
+                                classes="tool-block subagent-block",
+                            )
+                        else:
+                            block = ToolCallBlock(
+                                event.tool_name, event.arguments, classes="tool-block"
+                            )
+                        await ai_row.mount(block)
+                        tool_blocks[event.tool_id] = block
+                        self.call_after_refresh(chat.scroll_end, animate=False)
+
+                    elif isinstance(event, PermissionRequest):
+                        await self._handle_permission_request(event)
+
+                    elif isinstance(event, ToolResultEvent):
+                        block = tool_blocks.get(event.tool_id)
+                        if block:
+                            block.set_result(event.output, event.is_error, event.elapsed)
+                        self.call_after_refresh(chat.scroll_end, animate=False)
+
+                    elif isinstance(event, UserInputRequest):
+                        await self._handle_askuser(event)
+
+                    elif isinstance(event, TurnComplete):
+                        collapsible = [
+                            (tid, blk) for tid, blk in tool_blocks.items()
+                            if isinstance(blk, ToolCallBlock)
+                            and blk.tool_name in COLLAPSIBLE_TOOLS
+                            and not blk._loading
+                        ]
+                        if len(collapsible) >= 2:
+                            total_elapsed = sum(b._elapsed for _, b in collapsible)
+                            summary = ToolGroupSummary(
+                                len(collapsible), total_elapsed,
+                                classes="tool-block tool-group-summary",
+                            )
+                            for _, blk in collapsible:
+                                blk.display = False
+                            await ai_row.mount(summary)
+
+                        tool_blocks.clear()
+                        ai_row = Vertical(classes="ai-row")
+                        await chat.mount(ai_row)
                         streaming_label = Static("", classes="message ai-message")
                         await ai_row.mount(streaming_label)
-                    accumulated_text += event.text
-                    from rich.text import Text as RichText
-                    t = RichText()
-                    t.append("● ", style="bold color(99)")
-                    t.append(accumulated_text)
-                    streaming_label.update(t)
-                    self.call_after_refresh(chat.scroll_end, animate=False)
-
-                elif isinstance(event, RetryEvent):
-                    self._show_system_message(f"↻ Retrying: {event.reason}")
-
-                elif isinstance(event, ToolUseEvent):
-                    if accumulated_text:
-                        if streaming_label is not None:
-                            await streaming_label.remove()
-                        from rich.text import Text as RichText
-                        prefix = Static(RichText("●  ", style="bold color(99)"), classes="message")
-                        await ai_row.mount(prefix)
-                        md = Markdown(accumulated_text, classes="message ai-message")
-                        await ai_row.mount(md)
-                        streaming_label = None
                         accumulated_text = ""
-                    elif streaming_label is not None:
-                        await streaming_label.remove()
-                        streaming_label = None
+                        self.call_after_refresh(chat.scroll_end, animate=False)
 
-                    if _is_subagent_tool(event.tool_name):
-                        agent_type = event.arguments.get("subagent_type", "")
-                        desc = event.arguments.get("description", "")
-                        block = SubAgentBlock(
-                            agent_type or "agent",
-                            desc,
-                            classes="tool-block subagent-block",
+                    elif isinstance(event, UsageEvent):
+                        pass  # token 展示已移除
+
+                    elif isinstance(event, HookEvent):
+                        status = "✓" if event.success else "✗"
+                        self._show_system_message(
+                            f"Hook [{event.hook_id}] {status} {event.output}"
                         )
-                    else:
-                        block = ToolCallBlock(
-                            event.tool_name, event.arguments, classes="tool-block"
+
+                    elif isinstance(event, CompactNotification):
+                        self._show_system_message(event.message)
+
+                    elif isinstance(event, ErrorEvent):
+                        self._show_error(event.message)
+                        failure_displayed = failure_displayed or event.fatal
+
+                    elif isinstance(event, LoopComplete):
+                        total_time = _time.monotonic() - self._thinking_start
+                        done_label = Static(
+                            f"✻ {_to_past_tense(self._thinking_verb)} for {total_time:.1f}s",
+                            classes="message thinking-done",
                         )
-                    await ai_row.mount(block)
-                    tool_blocks[event.tool_id] = block
-                    self.call_after_refresh(chat.scroll_end, animate=False)
-
-                elif isinstance(event, PermissionRequest):
-                    await self._handle_permission_request(event)
-
-                elif isinstance(event, ToolResultEvent):
-                    block = tool_blocks.get(event.tool_id)
-                    if block:
-                        block.set_result(event.output, event.is_error, event.elapsed)
-                    self.call_after_refresh(chat.scroll_end, animate=False)
-
-                    ask_tool = self.registry.get("AskUserQuestion")
-                    if ask_tool and isinstance(ask_tool, AskUserTool) and ask_tool._pending_event:
-                        await self._handle_askuser(ask_tool._pending_event)
-
-                elif isinstance(event, TurnComplete):
-                    if self.session:
-                        for msg in self.conversation.history[history_cursor:]:
-                            self.session.append(msg)
-                        history_cursor = len(self.conversation.history)
-
-                    collapsible = [
-                        (tid, blk) for tid, blk in tool_blocks.items()
-                        if isinstance(blk, ToolCallBlock)
-                        and blk.tool_name in COLLAPSIBLE_TOOLS
-                        and not blk._loading
-                    ]
-                    if len(collapsible) >= 2:
-                        total_elapsed = sum(b._elapsed for _, b in collapsible)
-                        summary = ToolGroupSummary(
-                            len(collapsible), total_elapsed,
-                            classes="tool-block tool-group-summary",
-                        )
-                        for _, blk in collapsible:
-                            blk.display = False
-                        await ai_row.mount(summary)
-
-                    tool_blocks.clear()
-                    ai_row = Vertical(classes="ai-row")
-                    await chat.mount(ai_row)
-                    streaming_label = Static("", classes="message ai-message")
-                    await ai_row.mount(streaming_label)
-                    accumulated_text = ""
-                    self.call_after_refresh(chat.scroll_end, animate=False)
-
-                elif isinstance(event, UsageEvent):
-                    pass  # token 展示已移除
-
-                elif isinstance(event, HookEvent):
-                    status = "✓" if event.success else "✗"
-                    self._show_system_message(
-                        f"Hook [{event.hook_id}] {status} {event.output}"
-                    )
-
-                elif isinstance(event, CompactNotification):
-                    self._show_system_message(event.message)
-                    # auto_compact 已重写 conversation.history（摘要 +
-                    # boundary + 保留尾部）。先持久化 boundary 记录，然后
-                    # 将游标推进到重建后的历史末尾，这样 TurnComplete/LoopComplete
-                    # 刷盘时只追加 boundary 之后的新消息，不会把已压缩的
-                    # 前缀作为普通记录重复写入。
-                    self._persist_compact_boundary(event)
-                    history_cursor = len(self.conversation.history)
-
-                elif isinstance(event, ErrorEvent):
-                    self._show_error(event.message)
-
-                elif isinstance(event, LoopComplete):
-                    total_time = _time.monotonic() - self._thinking_start
-                    done_label = Static(
-                        f"✻ {_to_past_tense(self._thinking_verb)} for {total_time:.1f}s",
-                        classes="message thinking-done",
-                    )
-                    await ai_row.mount(done_label)
-                    if self.session:
-                        for msg in self.conversation.history[history_cursor:]:
-                            self.session.append(msg)
-                        history_cursor = len(self.conversation.history)
-                        self.session.meta.total_tokens = (
-                            self.agent.total_input_tokens
-                            + self.agent.total_output_tokens
-                        )
-                        self._spawn_task(
-                            self._update_session_summary()
-                        )
-                    if self.agent.plan_mode:
-                        self._spawn_task(
-                            self._show_plan_approval()
-                        )
+                        await ai_row.mount(done_label)
+                        if self.agent.plan_mode:
+                            self._spawn_task(
+                                self._show_plan_approval()
+                            )
 
             # 收尾：渲染剩余的累积文本
             if accumulated_text and streaming_label is not None:
@@ -1429,8 +1273,9 @@ class LikeCCApp(App):
                 )
                 await ai_row.mount(md)
             self._show_system_message("Operation cancelled")
-        except LLMError as e:
-            self._show_error(str(e))
+        except Exception as e:
+            if not failure_displayed:
+                self._show_error(str(e))
         finally:
             self._finish_streaming()
             input_widget.focus()
@@ -1539,7 +1384,7 @@ class LikeCCApp(App):
             else:
                 self._show_system_message("Type your feedback and send.")
 
-    async def _handle_askuser(self, event: AskUserEvent) -> None:
+    async def _handle_askuser(self, event: UserInputRequest) -> None:
         from likecc.askuser_dialog import InlineAskUserWidget
 
         chat = self.query_one("#chat-area", VerticalScroll)
@@ -1558,8 +1403,8 @@ class LikeCCApp(App):
         from likecc.askuser_dialog import InlineAskUserWidget
 
         req = getattr(self, "_pending_askuser_event", None)
-        if req is not None and not req.future.done():
-            req.future.set_result(event.answers if event.answers else {})
+        if req is not None and self._run_handle:
+            self._run_handle.reply(req.run_id, req.request_id, event.answers or {})
             self._pending_askuser_event = None
         try:
             self.query_one("#askuser-inline", InlineAskUserWidget).remove()
@@ -1586,6 +1431,14 @@ class LikeCCApp(App):
     def _finish_streaming(self) -> None:
         """清理所有 streaming 状态（取消或完成时调用）。"""
         self._streaming = False
+        self._pending_perm_request = self._pending_askuser_event = None
+        for selector in ("#perm-inline", "#askuser-inline"):
+            for widget in self.query(selector):
+                widget.remove()
+        try:
+            self.query_one("#chat-input").disabled = False
+        except Exception:
+            pass
         self._stop_spinner()
         self._stop_teammate_polling()
         self._agent_task = None
@@ -1681,8 +1534,8 @@ class LikeCCApp(App):
         from likecc.permission_dialog import InlinePermissionWidget
 
         req = getattr(self, "_pending_perm_request", None)
-        if req is not None:
-            req.future.set_result(event.response)
+        if req is not None and self._run_handle:
+            self._run_handle.reply(req.run_id, req.request_id, event.response)
             self._pending_perm_request = None
         # 从聊天区移除权限弹窗组件
         try:
@@ -1725,92 +1578,22 @@ class LikeCCApp(App):
         self.call_after_refresh(chat.scroll_end, animate=False)
 
     # -----------------------------------------------------------------
-    # Session 摘要（异步后台生成）
+    # MCP 状态展示（资源由 RuntimeExtensions 持有）
     # -----------------------------------------------------------------
 
-    async def _update_session_summary(self) -> None:
-        if not self.session or not self.client or not self.agent:
-            return
-        try:
-            summary = await generate_session_summary(
-                self.client, self.conversation, self.agent.protocol
-            )
-            if summary:
-                self.session.meta.summary = summary
-                self.session.meta.save(
-                    self.session._sessions_dir / f"{self.session.session_id}.meta"
-                )
-        except Exception:
-            pass
+    @property
+    def mcp_manager(self):
+        extensions = getattr(self.runtime, "extensions", None)
+        return extensions.mcp_manager if extensions else None
 
-    # -----------------------------------------------------------------
-    # MCP
-    # -----------------------------------------------------------------
-
-    async def _init_mcp(self) -> None:
+    async def _show_mcp_status(self):
         self._mcp_connecting = True
         self._update_mode_label()
-        manager = self.mcp_manager
-        manager.load_configs(self._mcp_server_configs)
-        tools_before = len(self.registry.list_tools())
-        errors = await manager.register_all_tools(self.registry)
+        await self.extensions.wait_ready()
         self._mcp_connecting = False
         self._update_mode_label()
-        for err in errors:
-            self._show_system_message(f"MCP warning: {err}")
-        tools_after = len(self.registry.list_tools())
-        mcp_tools = tools_after - tools_before
-        server_count = len(manager._clients)
-        if server_count > 0:
-            self._mcp_server_info = (
-                f"Connected to {server_count} MCP server(s), {mcp_tools} tools registered"
-            )
-        if server_count > 0 and mcp_tools > 0:
-            parts = []
-            for cfg in self._mcp_server_configs:
-                srv_name = cfg.name if hasattr(cfg, 'name') else str(cfg)
-                tool_names = [
-                    t.name for t in self.registry.list_tools()
-                    if t.name.startswith(f"mcp__{srv_name}__")
-                ]
-                section = f"## {srv_name}\n"
-                if tool_names:
-                    section += "Available tools: " + ", ".join(tool_names)
-                parts.append(section)
-            self._mcp_instructions = (
-                "# MCP Server Instructions\n\n"
-                "The following MCP servers are connected. "
-                "Use their tools when the user asks.\n\n"
-                + "\n\n".join(parts)
-            )
-
-    async def _serve_mcp(self) -> None:
-        # MCP/AnyIO contexts must exit in the task that entered them.
-        self.mcp_manager = MCPManager()
-        try:
-            try:
-                await self._init_mcp()
-            finally:
-                self._mcp_ready.set()
-            await self._mcp_stop.wait()
-        finally:
-            try:
-                await self.mcp_manager.shutdown()
-            finally:
-                self.mcp_manager = None
-                self._mcp_connecting = False
-
-    async def _shutdown_mcp(self) -> None:
-        if self._mcp_init_task is not None:
-            if not self._mcp_ready.is_set():
-                self._mcp_init_task.cancel()
-            else:
-                self._mcp_stop.set()
-            try:
-                await self._mcp_init_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._mcp_init_task = None
+        for warning in self.extensions.diagnostics:
+            self._show_system_message(f"MCP warning: {warning}")
 
     async def _shutdown_hooks(self, *, run_shutdown_hook: bool = True) -> None:
         """Finish or cancel every hook task before Textual closes its loop."""
@@ -1898,9 +1681,8 @@ class LikeCCApp(App):
             cleanup = [asyncio.create_task(self._shutdown_hooks(
                 run_shutdown_hook=run_shutdown_hook,
             ))]
-            cleanup.append(asyncio.create_task(self._shutdown_mcp()))
-            if extract_memories and self.agent and self.agent.memory_manager:
-                cleanup.append(asyncio.create_task(self.agent._extract_memories(self.conversation)))
+            if self.service:
+                cleanup.append(asyncio.create_task(self.service.aclose(extract_memories=extract_memories)))
             _, pending_cleanup = await asyncio.wait(cleanup, timeout=3.0)
             for task in pending_cleanup:
                 task.cancel()
@@ -1909,8 +1691,8 @@ class LikeCCApp(App):
                     self.log.error("Entry cleanup failed: %s", result)
         finally:
             try:
-                if self.session is not None:
-                    self.session.close()
+                if self.service is not None:
+                    await self.service.aclose()
             finally:
                 await self.runtime.aclose()
 

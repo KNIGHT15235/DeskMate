@@ -32,6 +32,7 @@ class Message:
     tool_uses: list[ToolUseBlock] = field(default_factory=list)
     tool_results: list[ToolResultBlock] = field(default_factory=list)
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list)
+    transient: bool = False  # generated context, excluded from session persistence
 
 
 # 估算最后一次 API 用量锚点之后追加的消息 token 开销时使用的字符/token 比率。
@@ -144,7 +145,7 @@ class ConversationManager:
 
     def inject_environment(self, context: str) -> None:
         if not self.env_injected:
-            self.history.insert(0, Message(role="user", content=context))
+            self.history.insert(0, Message(role="user", content=context, transient=True))
             self.env_injected = True
 
     def inject_long_term_memory(
@@ -178,7 +179,7 @@ class ConversationManager:
             "</system-reminder>"
         )
         pos = 1 if self.env_injected else 0
-        self.history.insert(pos, Message(role="user", content=wrapped))
+        self.history.insert(pos, Message(role="user", content=wrapped, transient=True))
         self.ltm_injected = True
 
     def replace_history(self, new_messages: list[Message]) -> None:
