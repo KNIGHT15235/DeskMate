@@ -351,3 +351,116 @@ PYTHONUTF8=1 python -m pytest -q -s -o cache_dir=/tmp/deskmate-r3-pytest-cache t
 阅读测试中的同步条件，确认 shell returncode=0 时 task 尚未结束；再看 _terminate_owned_process 去掉 returncode 条件的原因。可在本地临时打印父/子状态观察，不必修改已提交基线；实验后去掉打印。测试构造和真实模型效果无关。
 
 更多启动选项、已验证/待验收范围见 [桌面说明](deskmate-desktop.md)。R4 的个人事务能力尚未开始。
+
+## R3.1：异常安全与状态一致性学习记录
+
+实际基线为 R3 `b1d44a1ae6e09f009ac01260712a5dc508e0fd7b`。下面按阶段保留测试构造、程序化观察和人工验收记录。真实 Provider 在最初修复阶段尚未验收，后续 DeepSeek 和 Windows 离线托盘结果见后文。
+
+### 正常路径不能代表所有资源生命周期
+
+R3 的 DesktopApplication.poll() 会在正常退出时等待后台线程，再退出 Qt，所以已有正常退出测试能通过。但 launch 在这个对象构造之前就创建了非 daemon 控制器；若对象构造失败，poll 根本没有机会运行。exec 提前返回、信号注册部分失败也会绕过正常路径。
+
+`desktop/application.py: launch()` 现在持有从创建成功到退出的控制器所有权。`desktop/controller.py: request_close()` 是非阻塞关闭请求；`wait_closed(timeout)` 是 Qt 未运行/已结束后的有限等待，不关闭别人的资源，也不适合放进仍在运行的 GUI 按钮回调。Runtime、交互和唯一消费者仍在原 asyncio 线程中清理，主线程只等待线程结束。
+
+清理本身也会失败。launch 记录进入 finally 时的原异常，逐项尝试关闭、Qt 展示释放和信号恢复；有原异常则保留它并用 add_note 附加诊断。没有原异常且清理不完整时不能以正常退出码伪装成功。仅恢复确实注册成功的信号处理器，避免部分初始化后错误地恢复未取得的资源。
+
+`tests/test_desktop_launch.py` 使用真实控制器与 Qt 对象，并区分两类证据：替换 exec/构造器的纯控制流故障注入，以及实际运行 Qt exec 的正常退出。断言线程退出、client 单次关闭、会话文件关闭和信号恢复；不是只断言 mock 被调用。
+
+### 三种状态怎样对齐
+
+模型是否执行、是否仍需用户回复、UI 展示状态是三件不同的事。权限/问答超时后，工具已经收到错误结果，下一轮模型可能继续运行，此时 pending 应为空，展示应为 running；不能还说“等待回复”。
+
+`DesktopController._event()` 先校验事件属于当前 session/run，再用 tool_id 找到应结束的请求。只移除这个请求；最后一个交互结束、运行仍活动且状态正是 waiting 时，在同一锁内更新 pending 和 running。若已处于 cancelling/closing/终态，工具结果只能作为结果展示，不能把状态倒退成 running。
+
+`tests/test_desktop_wait_state.py::test_timeout_returns_to_running_while_next_model_call_is_blocked` 用明确事件确认下一模型调用已进入，再检查工具错误已经投影。权限与问答两条路径在 R3 基线都失败，本轮修复后通过；没有真实模型或 SDK 导入占位。另有线事件注入测试覆盖不相关工具、旧会话/运行及迟到结果；这类注入不表示内核已经支持多个并发人工审批。
+
+### 三种所有权仍然不同
+
+隐藏只改变窗口可见性，事件消费者仍属于应用控制器；取消只结束当前 RunHandle；退出才请求 Runtime 资源树结束。launch 的兜底补齐异常路径，没有把每次隐藏都变成关闭，也没有把等待线程放进活跃 Qt 槽函数。
+
+### 各种证据分别能证明什么
+
+- 单元/集成测试：明确的状态转换、关联拒绝、线程与资源关闭契约，使用 fake client 不产生模型费用。
+- Qt offscreen：实际控件和 Qt exec 的行为，不能证明用户能从真实桌面找回最小化窗口。
+- WSLg 可见窗口：程序化观察确认 Wayland 窗口显示并正常退出；随后用户亲自完成无托盘离线点击清单，确认最小化找回、取消/超时后重用、恢复历史不改写文件，以及两次正常退出清理。用户反馈与截图不等同于真实 Provider 验证。
+- 真实托盘：本机仍不可用，模拟托盘测试只证明策略，不能写成真实通过。
+- 真实 Provider：必须由用户手动或另行授权调用，才能证明现有凭据/服务及实际模型工具行为；修复与离线阶段未执行，后续 DeepSeek 指定验收的实际结果见下文。
+
+### 用户离线人工验收补记（2026-11-17）
+
+用户按桌面说明逐项执行并确认通过；没有记录用户的学习感受。实际现象对应三种不同职责：`DesktopController._event()` 投影交互结束，`DesktopController._dispatch()` 接受取消后的新任务以及新建/恢复会话，`DesktopApplication.apply_close_choice()` 区分取消关闭、最小化与退出。恢复前后的文件哈希、修改时间和大小由用户执行命令比较并反馈一致；正常演示和短超时演示均确认退出码 0、所记录 PID/线程结束和临时目录清理。
+
+超时截图显示工具拒绝/问答超时后运行 completed，第二次发送结束后顶部为就绪且无卡片。这证明用户所操作离线流程的收尾与重用；下一模型调用被阻塞时是否恢复 running，仍以同步屏障测试为证，不能从最终截图推断完整时序。离线验收当时尚未做真实服务，后续 DeepSeek 单独验证；真实托盘、原生 Windows、安装继续未验收。
+
+### 真实服务验收前的边界检查
+
+2026-11-17 的静态检查没有找到当前 WSL 标准位置的 Provider 配置，因此还没有服务请求。fake client 可以证明交互协议、取消和生命周期，不能证明凭据有效、网络可达、模型支持工具，或模型正确读取文件；配置可解析与凭据“存在”也不能代替真实调用。
+
+桌面当前在 `DesktopController._open()` 显式使用 DEFAULT，再由 PermissionChecker 与规则决定结果；本次预判为读放行、写询问。验收应核对实际判定及其原因，不能为了出现卡片切换到不符合既有语义的模式。PathSandbox 还允许系统临时根，Bash 另受命令权限控制，所以“只在验收目录工作”的提示词不等于强隔离；应在实际启动时把临时根留在验收目录、拒绝外部命令，并停止核查额外工具请求。
+
+实际托盘探测 False 只说明当前 Wayland 环境没有可用托盘，模拟探测 True 的测试只能证明分支策略。WSLg 的 Python、HOME、路径和 POSIX 进程组均属于 Linux；Windows 原生环境、配置目录、默认 shell 和子进程回收需单独验证。桌面说明已列后续检查，本次不据 WSLg 成功声明 Windows 或安装包通过。
+
+### 真实模型文字确认与工具权限的区别
+
+本次 DeepSeek 集成任务先成功 ReadFile，再输出 summary.md 草稿并用文字问是否批准，当前回合 completed。会话审计只有一次 ReadFile，没有 WriteFile，实际 summary.md 不存在。这说明模型自然语言计划、服务的单次运行完成、权限系统的实际写入审批是不同阶段；不能看到草稿或 completed 就判断文件已经生成，也不能因为没有卡片就认定桌面绕过了权限。
+
+离线 DemoClient 的预设步骤总会发出 WriteFile，真实模型则可能先向用户确认内容。正确验收是继续同一任务，让模型实际发出 WriteFile，再由现有 DEFAULT/规则与桌面交互决定是否执行，不用改 UI 或放松权限来制造卡片。首次回合只确认读取，后续写入与恢复的结果分别记录如下。
+
+后续用户确认草稿后，真实 WriteFile 卡片出现并获批；实际 summary.md 与工具参数完全一致，ReadFile/WriteFile 各一条成功调用记录，源文件哈希未变。这个闭环同时核对模型意图、权限交互、工具结果和磁盘副作用，比只看“写入成功”文字更完整。退出恢复仍需单独验证：真实模式工作区由验收流程持有，应用只关闭 Runtime/会话资源，不像 demo 那样删除临时目录，否则无法重开恢复。
+
+本次随后完成了真实退出重开与恢复：用户确认原会话历史/状态正确，实际文件哈希、修改时间、大小和工具计数均未变，原 assistant 仍五条、标记回复一次，新空白会话没有模型或工具记录。这个证据证明当前恢复展示不重放工具，不能据此推断“恢复后所有模型续聊均兼容”；本轮没有为该额外范围再发送付费请求。
+
+最终第二次退出也由用户确认返回 0，自动核查新 PID 消失、原会话及文件基线保留，真实验收收尾完成。当前可以建议在 WSLg 无托盘范围进入 R4，仍不把模拟托盘或 WSLg 结果推广成原生 Windows/安装包保证；本轮不开始 R4，也不把 assistant 条数或预估费用当成平台实际账单。
+
+### 三个面试问答
+
+1. **为什么 finally 只恢复信号还不够？** 因为控制器线程在信号和窗口构造前就已启动。当前 launch 的 try/finally 覆盖所有成功取得控制器后的退出路径，收尾还包括公开关闭/等待接口、Qt 对象释放与部分信号恢复。
+2. **为什么不能每个工具结果都设 running？** 无关工具可能不是等待请求的来源，取消/关闭也可能已经开始。当前用 session/run/tool 关联清理，并且只允许 waiting→running，不覆盖更后面的状态。
+3. **有限 join 会不会冻住正常界面？** 正常界面通过 request_close 与 poll 异步等待。wait_closed 仅在 Qt exec 尚未运行或已经返回/抛错后调用。实际 Qt 测试在 exec 内标记活动区间，断言兜底等待不发生在该区间；超时明确报告而不强杀。
+
+### 一个可亲手执行的实验
+
+在 WSL2 激活 cc 后执行：
+
+```bash
+cd /mnt/d/ldj/03/DeskMate
+PYTHONUTF8=1 QT_QPA_PLATFORM=offscreen python -m pytest -q --tb=short \
+  -o cache_dir=/tmp/deskmate-r31-pytest-cache \
+  tests/test_desktop_wait_state.py tests/test_desktop_launch.py
+```
+
+阅读超时测试中的 next_call 和 finalized：前者证明后台已经进入下一次模型调用，后者证明取消清理完成。再阅读 launch 故障注入中的原异常对象与 client/session/线程断言，观察“函数抛出”和“资源清理完成”为什么要分别验证。命令属于自动化实验；如要人工看窗口和超时卡片，使用桌面说明里的可见窗口命令，不能把 offscreen 当桌面验收。
+
+### Windows 原生环境准备中的实际发现（2026-11-18）
+
+独立 Windows `.venv-win-r31` 使用原生 Python 3.12.7 和锁定 PySide6 6.8.3；WSL cc 继续保持原样。同一份代码的托盘探测从 WSLg 的 False 变成 Windows 的 True，说明必须按实际桌面会话区分支持证据。True 仍只表示托盘服务存在，人工图标、菜单和退出验收尚未完成。
+
+原生五个桌面测试文件出现 39 passed、2 failed。`test_desktop_window.py` 对所有 socket.connect 抛错以禁止演示联网，但 Windows asyncio 的 `_make_self_pipe` 使用 `socket._fallback_socketpair` 建立本机回环连接。实际调用栈已证明这个拦截先破坏了事件循环初始化；失败不能直接解释为模型联网，也不能直接忽略为通过。
+
+后续修复测试时应区分解释器内部通信和业务网络请求，同时保留对外部连接的验证。本次没有改弱断言或调整产品事件循环，保留两项失败。独立 demo 控制器的 idle、线程退出和临时目录清理另行验证通过，只支持继续小范围人工检查，不能推广为 Windows 全平台测试通过。
+
+### 改用 Windows Conda 时如何保持依赖可复核（2026-11-18）
+
+当前原生验收改用 deskmate-win，旧 `.venv-win-r31` 与 WSL cc 保留。Conda 管理 Python 和运行库；uv export 从项目 uv.lock 导出带哈希的 desktop/dev requirements，uv pip install 显式指定 Conda 的 python.exe 安装。这样不会误选项目旧 venv，也不使用精确同步删除 Conda 工具包。本地项目另行 editable 安装并关闭业务依赖重新解析。
+
+“按 uv.lock 安装”需要验证目标解释器里实际生效的版本：本次逐行评估导出 requirements 的平台 marker，核对 57 个包的精确版本，再运行依赖兼容检查。Conda 的 Python/原生运行库、pip/setuptools/wheel 及构建隔离工具另有来源，不能宣称这些也全部由 uv.lock 锁定。新环境 packaging 从 Conda 初始 26.3 调整为锁定的 26.2，旧环境版本清单保持不变。
+
+Conda 环境不应依赖用户目录中偶然存在的 Python 包。本次用 python -s 排除用户 site-packages，实测 site.ENABLE_USER_SITE=False；conda run 负责环境路径，作用仅限新进程，不需要修改全局 Shell 配置。即使包版本一致，Windows 和 Linux 的底层事件循环行为仍可能不同，原有测试失败需要分别记录和定位。
+
+这次回归也说明重跑通过不等于缺陷消失：首轮关闭提示测试实际读到了普通 ACK 文案，源码中 application.poll 与 window.refresh 确实会写同一个 feedback，且警告仅首次写入。隔离 pytest 临时目录后的重跑通过了这一项，但没有改变这两个写入者的优先级，提示覆盖竞态仍需单独处理。TEMP 访问错误、测试防联网钩子和产品提示竞态是三类不同原因，记录时不能统一归咎于环境或直接忽略。
+
+### Windows 真实托盘人工验收收尾（2026-11-18）
+
+用户在 deskmate-win 中完成真实 D 图标、关闭隐藏、托盘恢复、DemoWait 运行中隐藏后继续执行、隐藏时从托盘取消、同会话重用及托盘退出，确认全部符合预期，退出码 0。用户和 Codex 的进程检查均确认原 PID 54464 已结束。此时托盘图标、菜单和后台执行的关系有了实际用户操作证据。
+
+从这组操作可以观察三个资源边界。标题栏 X 只隐藏窗口，控制器、唯一消费者和当前运行继续存在。托盘取消只结束当前运行，SessionService 仍可接受下一条输入。托盘退出请求关闭 Runtime，待后台线程退出后结束 Qt。结果与 application.py、controller.py 的各自职责对应。
+
+人工通过时，两项 socket 钩子兼容失败和关闭提示覆盖竞态仍存在，随后按下节修复。该原生人工流程覆盖了离线托盘行为，真实模型证据来自此前 WSLg DeepSeek 指定任务。此次人工工作区具体路径尚未提供，目录删除继续待确认。独立控制器预检的清理结果另有记录。
+
+### Windows 回归收尾修复（2026-11-18）
+
+Windows 的 asyncio 使用标准库 `socketpair()` 建立内部唤醒管道。测试现在只在该调用期间允许数字回环地址连接，通过 `ContextVar` 限定例外的执行上下文。`socketpair()` 返回即恢复限制，普通回环连接与外部地址的 `connect` 和 `connect_ex` 均继续拦截。新增测试用成对 socket 收发字节，再检验普通连接仍会抛错。两个 GUI 演示测试还检查全过程没有记录到被拦截的连接尝试，避免后台捕获异常时误报通过。
+
+关闭提示属于 Qt 主线程的应用生命周期状态。窗口发出退出请求后，后台可能尚未处理 close，但界面已经需要展示关闭进度。测试固定这段顺序，用受控时钟触发警告，再通过线程事件放行后台确认，同时让资源清理继续等待。修复前确认消息覆盖警告，修复后应用的关闭状态决定提示优先级，普通确认和托盘状态变化都保留警告。等清理真正完成后，退出回调恰好调用一次。
+
+这次同时跑了 Windows 和 WSL 的完整回归，并保留 Windows 修复前的同工作区基线。桌面测试的通过可与既有 Windows POSIX 命令失败分别核对，完整命令和计数见 [verification.md](verification.md) 的收尾复测节。

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,9 @@ from likecc.worktree.manager import WorktreeError, WorktreeManager
 from likecc.worktree.models import WorktreeSession
 from likecc.worktree.session import load_worktree_session, save_worktree_session
 from likecc.worktree.slug import flatten_slug, validate_slug
+
+# Windows runs shell commands through cmd.exe, where plain cd prints the cwd.
+CURRENT_DIRECTORY_COMMAND = "cd" if os.name == "nt" else "pwd"
 
 # =========================================================================
 # A. Slug 校验
@@ -463,13 +467,13 @@ class TestWorktreeManager:
             ToolCallComplete("read", "ReadFile", {"file_path": "README.md"})
         )
         bash_result = await agent._execute_tool_noninteractive(
-            ToolCallComplete("pwd", "Bash", {"command": "pwd"})
+            ToolCallComplete("cwd", "Bash", {"command": CURRENT_DIRECTORY_COMMAND})
         )
 
         assert not read_result.is_error
         assert "# Test" in read_result.output
         assert not bash_result.is_error
-        assert wt.path in bash_result.output
+        assert Path(bash_result.output.removeprefix("STDOUT:\n").strip()) == Path(wt.path)
 
     @pytest.mark.asyncio
     async def test_concurrent_agents_with_shared_tools_keep_work_dirs_isolated(
@@ -517,8 +521,8 @@ class TestWorktreeManager:
         agent_b.file_history = history_b
 
         async def run(agent: Agent, content: str):
-            pwd_result = await agent._execute_tool_noninteractive(
-                ToolCallComplete(f"pwd-{content}", "Bash", {"command": "pwd"})
+            cwd_result = await agent._execute_tool_noninteractive(
+                ToolCallComplete(f"cwd-{content}", "Bash", {"command": CURRENT_DIRECTORY_COMMAND})
             )
             write_result = await agent._execute_tool_noninteractive(
                 ToolCallComplete(
@@ -527,15 +531,15 @@ class TestWorktreeManager:
                     {"file_path": "shared.txt", "content": content},
                 )
             )
-            return pwd_result, write_result
+            return cwd_result, write_result
 
-        (pwd_a, write_a), (pwd_b, write_b) = await asyncio.gather(
+        (cwd_a, write_a), (cwd_b, write_b) = await asyncio.gather(
             run(agent_a, "alpha"),
             run(agent_b, "bravo"),
         )
 
-        assert not pwd_a.is_error and str(root_a) in pwd_a.output
-        assert not pwd_b.is_error and str(root_b) in pwd_b.output
+        assert not cwd_a.is_error and Path(cwd_a.output.removeprefix("STDOUT:\n").strip()) == root_a
+        assert not cwd_b.is_error and Path(cwd_b.output.removeprefix("STDOUT:\n").strip()) == root_b
         assert not write_a.is_error and not write_b.is_error
         assert (root_a / "shared.txt").read_text() == "alpha"
         assert (root_b / "shared.txt").read_text() == "bravo"

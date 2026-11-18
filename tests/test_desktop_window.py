@@ -1,8 +1,10 @@
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import socket
 import threading
 import time
+from contextvars import ContextVar
 from pathlib import Path
 
 import pytest
@@ -28,12 +30,51 @@ def spin(predicate, timeout=6):
     raise AssertionError("Qt condition timed out")
 
 
+@pytest.fixture
+def offline_socket_guard(monkeypatch):
+    blocked = []
+    in_socketpair = ContextVar("in_socketpair", default=False)
+    socketpair = socket.socketpair
+
+    def local_socketpair(*args, **kwargs):
+        token = in_socketpair.set(True)
+        try:
+            return socketpair(*args, **kwargs)
+        finally:
+            in_socketpair.reset(token)
+
+    def guard(connect):
+        def checked(sock, address):
+            # Windows asyncio uses a TCP loopback pair to wake its own event loop.
+            if (in_socketpair.get() and isinstance(address, tuple) and address
+                    and address[0] in ("127.0.0.1", "::1")):
+                return connect(sock, address)
+            blocked.append(address)
+            raise AssertionError(f"offline demo attempted network: {address!r}")
+        return checked
+
+    monkeypatch.setattr(socket, "socketpair", local_socketpair)
+    monkeypatch.setattr(socket.socket, "connect", guard(socket.socket.connect))
+    monkeypatch.setattr(socket.socket, "connect_ex", guard(socket.socket.connect_ex))
+    return blocked
+
+
+def test_offline_socket_guard_only_allows_internal_pair(offline_socket_guard):
+    sender, receiver = socket.socketpair()
+    with sender, receiver:
+        sender.sendall(b"x")
+        assert receiver.recv(1) == b"x"
+
+    with socket.socket() as sock:
+        for connect in (sock.connect, sock.connect_ex):
+            for address in (("127.0.0.1", 1), ("192.0.2.1", 1)):
+                with pytest.raises(AssertionError, match="offline demo attempted network"):
+                    connect(address)
+    assert len(offline_socket_guard) == 4
+
+
 @pytest.mark.parametrize("allow", [True, False])
-def test_gui_permission_question_hidden_resume_and_no_duplicate_execution(qtapp, allow, monkeypatch):
-    import socket
-    def no_network(*args, **kwargs):
-        raise AssertionError("offline demo attempted network")
-    monkeypatch.setattr(socket.socket, "connect", no_network)
+def test_gui_permission_question_hidden_resume_and_no_duplicate_execution(qtapp, allow, offline_socket_guard):
     c = DesktopController(DesktopOptions(demo=True))
     refresh_threads = set()
     class CheckedWindow(ChatWindow):
@@ -77,6 +118,7 @@ def test_gui_permission_question_hidden_resume_and_no_duplicate_execution(qtapp,
         spin(lambda: not c.is_alive)
         w.hide()
         w.deleteLater()
+    assert not offline_socket_guard
 
 
 def test_gui_wait_cancel_remains_responsive_and_can_send_again(qtapp):

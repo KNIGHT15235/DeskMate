@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,8 +37,13 @@ def turn(*events):
 @pytest.mark.asyncio
 async def test_six_real_tools_complete_a_file_workflow(tmp_path):
     target = tmp_path / "sample.py"
-    check = f"from pathlib import Path; assert Path({str(target)!r}).read_text() == 'value = 2\\n'; print('checked')"
-    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(check)}"
+    check = (
+        "from pathlib import Path; "
+        "assert Path('sample.py').read_text(encoding='utf-8') == 'value = 2\\n'; "
+        "print('checked')"
+    )
+    args = [sys.executable, "-c", check]
+    command = subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
     client = ScriptedClient([
         turn(ToolCallComplete("write", "WriteFile", {"file_path": str(target), "content": "value = 1\n"})),
         turn(ToolCallComplete("read", "ReadFile", {"file_path": str(target)})),

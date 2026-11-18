@@ -57,6 +57,23 @@ class DesktopController:
     def is_alive(self):
         return self._thread.is_alive()
 
+    def request_close(self) -> None:
+        """Nonblocking application close, including before the worker loop is ready."""
+        self._close_requested.set()
+        if self.is_alive:
+            self.submit("close")
+
+    def wait_closed(self, timeout: float = 5.0) -> bool:
+        """Bounded fallback before/after Qt exec; never use in a live GUI slot.
+
+        Running GUIs should request_close and poll is_alive instead. All resource
+        cleanup stays in the worker; joining only waits for that thread to exit.
+        """
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("Worker cannot wait for its own exit")
+        self._thread.join(timeout=timeout)
+        return not self.is_alive
+
     def snapshot(self) -> dict:
         with self._lock:
             return deepcopy(self._view)
@@ -317,7 +334,17 @@ class DesktopController:
             self._row("tool", f"{data['tool_name']}: {data['arguments']}", tool_id=data["tool_id"])
         elif kind == "ToolResultEvent":
             self._row("tool_error" if data["is_error"] else "result", data["output"], tool_id=data["tool_id"])
-            self._set(pending=[])
+            with self._lock:
+                pending = self._view["pending"]
+                remaining = [p for p in pending if not (
+                    p["session_id"] == event["session_id"] and p["run_id"] == event["run_id"]
+                    and p["tool_id"] == data["tool_id"])]
+                if len(remaining) != len(pending):
+                    self._view["pending"] = remaining
+                    if (not remaining and self._view["state"] == "waiting" and not self._closing
+                            and self._run is not None and self._run.status == "running"):
+                        self._view["state"] = "running"
+                    self._view["revision"] += 1
         elif kind == "ErrorEvent":
             self._row("error" if data["fatal"] else "diagnostic", data["message"])
         elif kind == "LoopComplete":

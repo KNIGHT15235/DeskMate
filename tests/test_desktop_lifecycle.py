@@ -112,36 +112,65 @@ def test_exit_while_permission_pending_and_late_commands_rejected(lifecycle):
     assert quit_calls == [True]
 
 
-def test_slow_cleanup_keeps_gui_responsive_and_reports_timeout():
+def test_slow_cleanup_keeps_gui_responsive_and_reports_timeout(monkeypatch):
     import asyncio
     import threading
+    from types import SimpleNamespace
+    from likecc.desktop import application
     from likecc.runtime import Runtime
     app = QApplication.instance() or QApplication([])
+    now = [10.0]
+    monkeypatch.setattr(application, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    dispatch_close = threading.Event()
     release, entered = threading.Event(), threading.Event()
+
+    class DelayedCloseController(DesktopController):
+        async def _dispatch(self, command_id, command, data):
+            if command == "close":
+                while not dispatch_close.is_set():
+                    await asyncio.sleep(0.01)
+            await super()._dispatch(command_id, command, data)
+
     class SlowRuntime(Runtime):
         async def _close(self):
             entered.set()
             while not release.is_set():
                 await asyncio.sleep(0.01)
             await super()._close()
-    c = DesktopController(DesktopOptions(demo=True), runtime_factory=SlowRuntime)
+    c = DelayedCloseController(DesktopOptions(demo=True), runtime_factory=SlowRuntime)
     quit_calls = []
-    owner = DesktopApplication(app, c, DesktopOptions(demo=True), tray_probe=lambda: False,
-        quit_callback=lambda: quit_calls.append(True), shutdown_warning_seconds=0)
+    available = [True]
+    owner = DesktopApplication(app, c, DesktopOptions(demo=True), tray_probe=lambda: available[0],
+        tray_factory=FakeTray, quit_callback=lambda: quit_calls.append(True))
     try:
+        owner.timer.stop()
+        owner.window.timer.stop()
         spin(lambda: c.snapshot()["state"] == "idle")
+        owner.window.close()
+        assert not owner.window.isVisible()
         owner.request_exit()
+        now[0] += 16
+        owner.poll()
+        warning = owner.window.feedback.text()
+        assert "尚未完成关闭" in warning
+        assert c.snapshot()["command"] is None
+
+        dispatch_close.set()
         spin(lambda: entered.is_set())
+        assert c.snapshot()["command"]["accepted"]
+        owner.window.refresh()
+        assert owner.window.feedback.text() == warning
+        available[0] = False
         owner.poll()
         assert c.is_alive and not quit_calls
-        assert "尚未完成关闭" in owner.window.feedback.text()
+        assert owner.window.feedback.text() == warning
         assert owner.window.isVisible()
-        assert not owner.window.send_button.isEnabled() or c.snapshot()["state"] == "closing"
+        assert not owner.window.send_button.isEnabled()
     finally:
+        c.request_close()
+        dispatch_close.set()
         release.set()
         spin(lambda: not c.is_alive)
         owner.poll()
-        app.removeEventFilter(owner)
-        owner.window.deleteLater()
-        owner.deleteLater()
+        owner.dispose()
     assert quit_calls == [True]

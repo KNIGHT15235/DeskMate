@@ -144,7 +144,9 @@ class ChatWindow(QMainWindow):
         ack = state["command"]
         if ack and ack["id"] != self._last_command:
             self._last_command = ack["id"]
-            self.feedback.setText(("后端已接受：" if ack["accepted"] else "未接受：") + ack["message"])
+            # Application-level shutdown feedback takes priority over delayed replies.
+            if self.lifecycle is None or not self.lifecycle.is_closing:
+                self.feedback.setText(("后端已接受：" if ack["accepted"] else "未接受：") + ack["message"])
             if not ack["accepted"]:
                 for button in self.request_area.findChildren(QPushButton):
                     button.setEnabled(True)
