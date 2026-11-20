@@ -2,7 +2,7 @@
 
 一个学习 Claude Code 工作方式的 Python 终端编程助手实验项目。当前开发副本以 LikeCC 0.2.0 为基线，逐步演进为 **DeskMate（桌伴）**：具备个人事务执行、个人记忆、后台调度和主动提醒能力的桌面助手。
 
-R1/R2 已建立共享运行时、统一执行内核与会话服务。R3 新增可选的 Qt 桌面入口、应用级后台控制器和托盘生命周期；个人事务、调度和新记忆能力仍是后续计划。Python 包、原 CLI 和 `.likecc` 数据路径保持现有名称。进度和学习入口见 [DeskMate 路线图](docs/deskmate-roadmap.md) 与 [学习记录](docs/deskmate-learning.md)。
+R1/R2 已建立共享运行时、统一执行内核与会话服务。R3/R3.1 增加 Qt 桌面、后台生命周期和异常收尾。R4 的桌面资料模式可读取明确给出的公网网页与工作区文本，生成带工具来源记录的 Markdown 并回读校验。离线验证与真实验收状态见[资料模式](docs/deskmate-affairs.md)。Python 包、原 CLI 和 `.likecc` 数据路径沿用原名，后续进度见[路线图](docs/deskmate-roadmap.md)与[学习记录](docs/deskmate-learning.md)。
 
 本项目为独立学习实践，与 Anthropic 无官方关联，也不声称复现 Claude Code 的完整内部实现。
 
@@ -21,7 +21,7 @@ R1/R2 已建立共享运行时、统一执行内核与会话服务。R3 新增�
 
 ## 安装
 
-需要 Python 3.11 或更高版本、uv；使用 Worktree 时还需要 Git。推荐 Linux 或 Windows 的 WSL 环境；Bash 工具依赖系统中的 `bash`。克隆仓库并安装锁定依赖：
+需要 Python 3.11 或更高版本、uv；使用 Worktree 时还需要 Git。Bash 工具使用系统 Shell，WSL/Linux 通常为 `/bin/sh`，Windows 原生为 `cmd.exe`。命令须采用所在系统的语法。克隆仓库并安装锁定依赖：
 
 ```bash
 git clone https://github.com/KNIGHT15235/likecc.git
@@ -110,7 +110,7 @@ LikeCC 0.2.0 在 2026-09-22 的发布验证为 Python 3.11 和 3.12 各 **720 �
 - 已验证用例以本地 fake 模型、临时文件和临时 Git 仓库为主，不代表真实模型服务、所有操作系统或外部 MCP 服务都已验证。
 - TUI 与 `-p` 共用核心 Agent 能力；`-p` 尚未装配 TUI 的 Memory、Session、Skill 与 MCP 全套管理器。
 - Hook 的 `agent` 执行器、插件来源的 Agent 加载尚未实现。
-- DeskMate 的统一执行与会话服务、桌面入口、个人事务、调度、个人记忆和主动通知尚未实现，按 R2–R8 逐步推进。
+- 持久调度、个人记忆升级和主动通知仍在规划中。R4 首版资料模式的格式、来源、网络和平台边界见[验收说明](docs/deskmate-affairs.md)。
 - Fork 保留可复用的请求前缀；实际缓存命中取决于服务端、模型和请求内容，不承诺固定命中率。
 - 子 Agent 的报告格式由提示词约束；Worktree 提供工作目录隔离，权限检查不等同于操作系统级安全沙箱。
 - 本仓库公开版本仅包含源码、测试与示例，不包含开发阶段的审计备份、运行日志或个人配置。
@@ -118,3 +118,31 @@ LikeCC 0.2.0 在 2026-09-22 的发布验证为 Python 3.11 和 3.12 各 **720 �
 ## 许可证
 
 采用 [MIT License](LICENSE)。
+
+## 本机 Windows Conda 启动示例
+
+以下命令使用本机已有的 R4 样例工作区和 Provider 配置。
+
+```powershell
+deactivate
+conda activate deskmate-win
+
+& {
+    Set-Location 'D:\ldj\03\DeskMate'
+    $savedKey = $env:ANTHROPIC_API_KEY
+    $savedToken = $env:ANTHROPIC_AUTH_TOKEN
+    $secret = Read-Host 'DeepSeek Key' -AsSecureString
+
+    try {
+        $env:ANTHROPIC_API_KEY = ([pscredential]::new('DeepSeek', $secret)).GetNetworkCredential().Password
+        $env:ANTHROPIC_AUTH_TOKEN = $null
+
+        & 'D:\anaconda3\Scripts\conda.exe' run --no-capture-output -n deskmate-win python -s -X utf8 -m likecc.desktop --work-dir 'D:\ldj\03\DeskMate\.r1-verification\r4-public-pvrwgaf4' --provider deepseek-r4
+    }
+    finally {
+        $env:ANTHROPIC_API_KEY = $savedKey
+        $env:ANTHROPIC_AUTH_TOKEN = $savedToken
+        $secret.Dispose()
+    }
+}
+```

@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 import uuid
 
 from likecc.config import AppConfig, ConfigError, ProviderConfig, load_config
+from likecc.affairs import install_materials_profile
 from likecc.extensions import ExtensionOptions, RuntimeExtensions
 from likecc.permissions import PermissionMode
 from likecc.runtime import Runtime
@@ -23,6 +24,7 @@ from likecc.service import SessionService
 MAX_ROWS = 200
 MAX_TEXT = 12000
 MAX_DISPLAY_CHARS = 180000
+MAX_RECEIPTS = 32
 SUPPORTED_QUESTIONS = {"text", "radio", "select", "checkbox"}
 
 
@@ -44,12 +46,14 @@ class DesktopController:
         self._options = options
         self._runtime_factory = runtime_factory
         self._lock = threading.Lock()
+        self._receipts = {}
         self._view = {"revision": 0, "state": "starting", "session_id": "", "run_id": "",
                       "rows": [], "pending": [], "sessions": [], "notice": "",
                       "command": None, "demo": options.demo, "workspace": "", "provider": "",
-                      "worker_thread": None}
+                      "worker_thread": None, "materials": None}
         self._loop = None
         self._close_requested = threading.Event()
+        self._shutdown_error = None
         self._thread = threading.Thread(target=self._thread_main, name="deskmate-asyncio", daemon=False)
         self._thread.start()
 
@@ -72,27 +76,58 @@ class DesktopController:
         if threading.current_thread() is self._thread:
             raise RuntimeError("Worker cannot wait for its own exit")
         self._thread.join(timeout=timeout)
+        if not self.is_alive and self._shutdown_error is not None:
+            raise RuntimeError("后台资源关闭失败") from self._shutdown_error
         return not self.is_alive
 
     def snapshot(self) -> dict:
         with self._lock:
             return deepcopy(self._view)
 
-    def submit(self, command: str, **data) -> str:
-        """Nonblocking thread-safe submission; acceptance arrives in snapshot.command."""
+    def submit_ui(self, command: str, **data) -> str | None:
+        """Reserve a receipt before submitting; unconsumed receipts are never evicted."""
         command_id = uuid.uuid4().hex
+        reply = command == "reply"
+        with self._lock:
+            # A full ordinary queue must not delay a permission or question reply.
+            used = sum((name == "reply") == reply for name, _ in self._receipts.values())
+            if used >= (1 if reply else MAX_RECEIPTS):
+                return None
+            self._receipts[command_id] = (command, None)
+        self._submit(command_id, command, data)
+        return command_id
+
+    def take_receipts(self):
+        with self._lock:
+            ready = [key for key, (_, receipt) in self._receipts.items() if receipt is not None]
+            return [self._receipts.pop(key)[1] for key in ready]
+
+    def _ack(self, command_id, accepted, message):
+        receipt = {"id": command_id, "accepted": accepted, "message": message}
+        with self._lock:
+            if command_id in self._receipts:
+                self._receipts[command_id] = (self._receipts[command_id][0], receipt)
+            self._view["command"] = receipt
+            self._view["revision"] += 1
+
+    def submit(self, command: str, **data) -> str:
+        """Submit control/diagnostic commands without reserving UI receipt capacity."""
+        command_id = uuid.uuid4().hex
+        self._submit(command_id, command, data)
+        return command_id
+
+    def _submit(self, command_id, command, data):
         if command == "close":
             self._close_requested.set()
         loop = self._loop
         if loop is None or not self.is_alive:
-            self._set(command={"id": command_id, "accepted": False, "message": "后台尚未就绪或已关闭"})
-            return command_id
+            self._ack(command_id, False, "后台尚未就绪或已关闭")
+            return
         payload = deepcopy(data)
         try:
             loop.call_soon_threadsafe(self._schedule, command_id, command, payload)
         except RuntimeError:
-            self._set(command={"id": command_id, "accepted": False, "message": "后台已关闭"})
-        return command_id
+            self._ack(command_id, False, "后台已关闭")
 
     def _set(self, **values):
         with self._lock:
@@ -133,15 +168,22 @@ class DesktopController:
         try:
             asyncio.run(self._lifetime())
         except BaseException as exc:
+            self._shutdown_error = exc
             self._row("error", f"后台退出异常：{type(exc).__name__}: {exc}")
         finally:
-            self._set(state="closed", pending=[])
+            with self._lock:
+                for key, (command, receipt) in self._receipts.items():
+                    if receipt is None:
+                        self._receipts[key] = (command, {"id": key, "accepted": False, "message": "后台已关闭"})
+                self._view.update(state="closed", pending=[])
+                self._view["revision"] += 1
 
     async def _lifetime(self):
         self._loop = asyncio.get_running_loop()
         self._stop = asyncio.Event()
         self._commands = set()
         self._runtime = self._service = self._run = self._consumer = None
+        self._affairs = None
         self._demo_dir = None
         self._closing = False
         self._set(worker_thread=threading.get_ident())
@@ -159,25 +201,34 @@ class DesktopController:
             for task in list(self._commands):
                 task.cancel()
             await asyncio.gather(*self._commands, return_exceptions=True)
-            await self._release()
-            self._loop = None
+            try:
+                await self._release()
+            finally:
+                self._loop = None
 
     async def _release(self):
-        try:
-            if self._runtime:
+        if self._runtime:
+            try:
                 await self._runtime.aclose()
-            if self._consumer:
-                await asyncio.gather(self._consumer, return_exceptions=True)
-        finally:
-            self._runtime = self._service = self._run = self._consumer = None
-            if self._demo_dir:
+            except Exception as exc:
+                raise RuntimeError(f"运行资源尚未关闭: {exc}") from exc
+        if self._consumer:
+            await asyncio.gather(self._consumer, return_exceptions=True)
+        self._runtime = self._service = self._run = self._consumer = None
+        self._affairs = None
+        if self._demo_dir:
+            try:
                 self._demo_dir.cleanup()
-                self._demo_dir = None
+            except OSError as exc:
+                raise OSError(f"运行资源已关闭，临时目录尚未删除: {exc}") from exc
+            self._demo_dir = None
 
     async def _open(self, options):
-        self._set(state="starting", pending=[])
-        await self._release()
+        self._set(state="starting", pending=[], workspace="", provider="", session_id="", sessions=[], run_id="", materials=None)
+        released = False
         try:
+            await self._release()
+            released = True
             if options.demo:
                 from .demo import DemoClient, DemoWait
                 self._demo_dir = TemporaryDirectory(prefix="deskmate-desktop-")
@@ -200,10 +251,13 @@ class DesktopController:
             self._set(workspace=str(workspace), provider=f"{provider.name} / {provider.model}", demo=options.demo)
             self._runtime = self._runtime_factory(config=config, work_dir=workspace,
                 permission_mode=PermissionMode.DEFAULT, user_home=user_home, client_factory=client_factory)
+            self._runtime.retry_close_errors = True
             extensions = RuntimeExtensions(self._runtime, ExtensionOptions(
                 interactive_tools=True, skills=options.skills and not options.demo,
                 hooks=options.hooks and not options.demo, mcp=options.mcp and not options.demo))
             await self._runtime.initialize(provider)
+            if not options.demo:
+                self._affairs = install_materials_profile(self._runtime)
             await extensions.initialize()
             if options.demo:
                 self._runtime.registry.register(DemoWait())
@@ -212,20 +266,25 @@ class DesktopController:
             for name in ("ExitPlanMode", "EnterPlanMode", "SyntheticOutput"):
                 self._runtime.registry.disable(name)
             self._service = SessionService(self._runtime, persistent=True,
-                memory=options.memory and not options.demo, summaries=options.summaries and not options.demo)
+                memory=options.memory and not options.demo, summaries=options.summaries and not options.demo,
+                affairs=self._affairs)
             self._options = options
             self._set(state="idle", rows=[], pending=[], run_id="", notice="",
-                      session_id=self._service.session.session_id)
+                      session_id=self._service.session.session_id, materials=self._materials())
             self._sessions()
         except Exception as exc:
-            await self._release()
-            self._set(state="error", pending=[])
             detail = "配置结构或 YAML 格式无效（不展示可能含凭据的原始配置片段）" if isinstance(exc, ConfigError) else str(exc)
+            if released:
+                try:
+                    await self._release()
+                except Exception as cleanup_error:
+                    detail += f"。清理失败：{cleanup_error}"
+            self._set(state="error", pending=[], workspace="", provider="", session_id="", sessions=[])
             self._row("error", f"启动失败：{type(exc).__name__}: {detail}；可重试或进入离线演示。")
 
     def _schedule(self, command_id, command, data):
         if self._closing:
-            self._set(command={"id": command_id, "accepted": False, "message": "正在关闭"})
+            self._ack(command_id, False, "正在关闭")
             return
         task = asyncio.create_task(self._dispatch(command_id, command, data))
         self._commands.add(task)
@@ -267,14 +326,14 @@ class DesktopController:
                     if self.snapshot()["state"] == "error":
                         raise RuntimeError("启动失败，见诊断")
                 else:
-                    if self._service is None:
+                    if state != "idle" or self._service is None:
                         raise RuntimeError("请先选择有效配置或进入离线演示")
                     if command == "send":
                         prompt = data["text"].strip()
                         if not prompt:
                             raise ValueError("输入不能为空")
                         self._run = self._service.start(prompt, interactive=True, permission_timeout=self._options.permission_timeout)
-                        self._set(state="running", run_id=self._run.run_id, pending=[])
+                        self._set(state="running", run_id=self._run.run_id, pending=[], materials=self._materials())
                         self._row("user", prompt)
                         self._consumer = asyncio.create_task(self._consume(self._run))
                     else:
@@ -283,7 +342,8 @@ class DesktopController:
                         else:
                             if self._service.resume(data["session_id"]) is None:
                                 raise ValueError("会话未找到")
-                        self._set(rows=[], run_id="", pending=[], session_id=self._service.session.session_id)
+                        self._set(rows=[], run_id="", pending=[], session_id=self._service.session.session_id,
+                                  materials=self._materials())
                         for m in self._service.conversation.history:
                             if not m.transient:
                                 if m.content:
@@ -297,11 +357,14 @@ class DesktopController:
                 raise ValueError(f"未知命令：{command}")
         except Exception as exc:
             accepted, message = False, str(exc)
-        self._set(command={"id": command_id, "accepted": accepted, "message": message})
+        self._ack(command_id, accepted, message)
 
     def _sessions(self):
         self._set(sessions=[{"id": m.id, "title": m.title or "未命名", "count": m.message_count}
                             for m in self._service.session_manager.list()[:100]])
+
+    def _materials(self):
+        return self._affairs.summary() if self._affairs is not None else None
 
     async def _consume(self, run):
         try:
@@ -335,6 +398,9 @@ class DesktopController:
         elif kind == "ToolResultEvent":
             self._row("tool_error" if data["is_error"] else "result", data["output"], tool_id=data["tool_id"])
             with self._lock:
+                if self._affairs is not None:
+                    self._view["materials"] = self._materials()
+                    self._view["revision"] += 1
                 pending = self._view["pending"]
                 remaining = [p for p in pending if not (
                     p["session_id"] == event["session_id"] and p["run_id"] == event["run_id"]
@@ -349,6 +415,6 @@ class DesktopController:
             self._row("error" if data["fatal"] else "diagnostic", data["message"])
         elif kind == "LoopComplete":
             self._row("status", f"运行结束：{data['status']}")  # result already streamed; do not repeat
-            self._set(pending=[], last_status=data["status"])
+            self._set(pending=[], last_status=data["status"], materials=self._materials())
         elif kind in {"HookEvent", "CompactNotification", "RetryEvent"}:
             self._row("diagnostic", str(data))

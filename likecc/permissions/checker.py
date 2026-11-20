@@ -35,11 +35,31 @@ class PermissionChecker:
         self.rule_engine = rule_engine
         self.mode = mode
         self.plan_file_path: str = ""
+        self.materials = None
 
 
     def check(self, tool: Tool, arguments: dict[str, Any]) -> Decision:
         content = extract_content(tool.name, arguments)
         sandbox_path = extract_path(tool.name, arguments)
+
+        if tool.name == "FetchWebPage" and tool.category == "network":
+            try:
+                url = str(tool.allowed_url(arguments.get("url")))
+            except ValueError as exc:
+                return Decision("deny", str(exc))
+            rule = self.rule_engine.evaluate(tool.name, url, deny_first=True)
+            raw_rule = self.rule_engine.evaluate(tool.name, content, deny_first=True) if content != url else rule
+            if self.mode == PermissionMode.PLAN or "deny" in (rule, raw_rule):
+                return Decision("deny", "权限规则拒绝网页读取")
+            if "allow" in (rule, raw_rule):
+                return Decision("allow", "权限规则放行网页读取")
+            return Decision("ask", "本次网页读取需要确认")
+
+        if self.materials is not None and tool.name in ("ReadFile", "WriteFile"):
+            try:
+                self.materials.path(arguments.get("file_path"), write=tool.name == "WriteFile")
+            except (OSError, RuntimeError, ValueError) as exc:
+                return Decision("deny", str(exc))
 
         # Layer 1: 危险命令黑名单（仅 command 类工具）
         if tool.category == "command":

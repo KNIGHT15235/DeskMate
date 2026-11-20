@@ -19,6 +19,7 @@ _CONTENT_FIELDS: dict[str, str] = {
     "EditFile": "file_path",
     "Glob": "pattern",
     "Grep": "pattern",
+    "FetchWebPage": "url",
 }
 
 _PATH_FIELDS: dict[str, str] = {
@@ -123,10 +124,13 @@ class RuleEngine:
         return tiers
 
 
-    def evaluate(self, tool_name: str, content: str) -> Effect | None:
+    def evaluate(self, tool_name: str, content: str, *, deny_first: bool = False) -> Effect | None:
         if any(rule.matches(tool_name, content) for rule in self._inherited_denials):
             return "deny"
-        for rules in self._load_tiers():
+        tiers = self._load_tiers()
+        if deny_first and any(r.effect == "deny" and r.matches(tool_name, content) for tier in tiers for r in tier):
+            return "deny"
+        for rules in tiers:
             for rule in reversed(rules):
                 if rule.matches(tool_name, content):
                     return rule.effect

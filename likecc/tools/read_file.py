@@ -27,9 +27,11 @@ class ReadFile(Tool):
     is_concurrency_safe = True
 
 
-    def __init__(self, file_cache: FileCache | None = None, file_state_cache: FileStateCache | None = None) -> None:
+    def __init__(self, file_cache: FileCache | None = None, file_state_cache: FileStateCache | None = None,
+                 *, read_text=None) -> None:
         self._cache = file_cache
         self._state_cache = file_state_cache
+        self._read_text = read_text or (lambda path: path.read_text(encoding="utf-8"))
 
 
     async def execute(self, params: Params) -> ToolResult:
@@ -46,7 +48,7 @@ class ReadFile(Tool):
             version = (before.st_mtime_ns, before.st_ctime_ns, before.st_size, before.st_ino)
             text = self._cache.get(resolved, version=version) if self._cache is not None else None
             if text is None:
-                text = path.read_text(encoding="utf-8")
+                text = self._read_text(path)
             after = path.stat()
             after_version = (after.st_mtime_ns, after.st_ctime_ns, after.st_size, after.st_ino)
             if version != after_version:

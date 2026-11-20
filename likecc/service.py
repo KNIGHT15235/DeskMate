@@ -101,13 +101,14 @@ class RunHandle:
 
 class SessionService:
     def __init__(self, runtime, *, persistent: bool = False, memory: bool = False,
-                 summaries: bool = False, cleanup_sessions: bool = False):
+                 summaries: bool = False, cleanup_sessions: bool = False, affairs=None):
         if runtime.agent is None or runtime.closed:
             raise RuntimeError("Initialize Runtime before creating a service")
         if getattr(runtime, "service", None) is not None:
             raise RuntimeError("Runtime already has a session service")
         self.runtime = runtime
         self.agent = runtime.agent
+        self.affairs = affairs
         self._tool_session_root = self.agent.session_dir
         self.conversation = ConversationManager()
         self.session_manager = SessionManager(runtime.work_dir) if persistent else None
@@ -146,7 +147,9 @@ class SessionService:
         self.agent.session_dir = self._tool_session_root / uuid.uuid4().hex
         self.agent.session_dir.mkdir(parents=True, exist_ok=True)
         self.agent.session_id = self.session.session_id if self.session else ""
-        self.file_history = FileHistory(self.runtime.work_dir, self.session.session_id) if self.session else None
+        self.file_history = FileHistory(self.runtime.work_dir, self.session.session_id) if self.session and self.affairs is None else None
+        if self.affairs is not None:
+            self.affairs.begin("")
         self.agent.file_history = self.file_history
         for tool in self.runtime.registry.list_tools():
             if hasattr(tool, "file_history"):
@@ -203,6 +206,8 @@ class SessionService:
 
     def start(self, prompt: str, *, interactive: bool = False, permission_timeout: float = 300) -> RunHandle:
         self._ensure_idle()
+        if self.affairs is not None:
+            self.affairs.begin(prompt)
         handle = RunHandle(self, interactive, permission_timeout)
         self.active_run = self.last_run = handle
         handle._task = asyncio.create_task(self._execute(handle, prompt), name=f"session-run-{handle.run_id}")
@@ -292,6 +297,8 @@ class SessionService:
                         self.record_compact(event)
                     if isinstance(event, ToolResultEvent):
                         results[event.tool_id] = event
+                    if self.affairs is not None:
+                        self.affairs.observe(event)
                     if isinstance(event, ErrorEvent) and event.fatal:
                         fatal_reported = True
                     self._flush()
@@ -306,6 +313,8 @@ class SessionService:
         finally:
             run.interaction.close()
             try:
+                if self.affairs is not None:
+                    self.affairs.finish()
                 if run.status != "completed":
                     self._repair_interrupted_tools(results)
                 self._flush()

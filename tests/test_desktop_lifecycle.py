@@ -158,6 +158,8 @@ def test_slow_cleanup_keeps_gui_responsive_and_reports_timeout(monkeypatch):
         dispatch_close.set()
         spin(lambda: entered.is_set())
         assert c.snapshot()["command"]["accepted"]
+        late = c.submit_ui("new")
+        spin(lambda: c.snapshot()["command"]["id"] == late)
         owner.window.refresh()
         assert owner.window.feedback.text() == warning
         available[0] = False

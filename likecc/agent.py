@@ -329,6 +329,7 @@ class Agent:
         self.hook_engine = hook_engine
         self.query_source = query_source
         self.system_prompt_override = system_prompt_override
+        self.affairs_mode = False
         self._last_system_prompt: str | None = None
         self._current_conversation: ConversationManager | None = None
         self._loop_count = 0
@@ -549,6 +550,7 @@ class Agent:
                 hook_prompts=hook_prompts,
                 coordinator_mode=self.coordinator_mode,
                 agent_catalog=self._agent_catalog_list or None,
+                **({"affairs": True, "work_dir": self.work_dir} if self.affairs_mode else {}),
             )
             if self.system_prompt_override is not None:
                 system = self.system_prompt_override
@@ -851,6 +853,8 @@ class Agent:
     def _build_permission_description(self, tc: ToolCallComplete) -> str:
         if tc.tool_name == "Bash":
             return tc.arguments.get("command", tc.tool_name)
+        if tc.tool_name == "FetchWebPage":
+            return tc.arguments.get("url", tc.tool_name)
         if tc.tool_name in ("ReadFile", "WriteFile", "EditFile"):
             return tc.arguments.get("file_path", tc.tool_name)
         return str(tc.arguments)
@@ -1091,7 +1095,7 @@ class Agent:
         auto_compact 能重新附加这些数据。每次 ReadFile 多一次磁盘读取，
         比从 tool 输出中反向解析行号要划算。
         """
-        if result.is_error or tc.tool_name != "ReadFile":
+        if self.affairs_mode or result.is_error or tc.tool_name != "ReadFile":
             return
         raw_path = tc.arguments.get("file_path") if isinstance(tc.arguments, dict) else None
         if not raw_path:

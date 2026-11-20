@@ -14,8 +14,16 @@ class FileStateCache:
         granularity or preserved mtimes must not authorize unseen changes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, read_text=None) -> None:
         self._cache: dict[str, tuple[str, int]] = {}
+        self._read_text = read_text or (lambda path: path.read_text(encoding="utf-8"))
+
+    def content(self, path: str) -> str | None:
+        entry = self._cache.get(path)
+        return entry[0] if entry else None
+
+    def forget(self, path: str) -> None:
+        self._cache.pop(path, None)
 
     def record(self, path: str, content: str, mtime_ns: int) -> None:
         """Record a file's content and mtime after a successful read."""
@@ -43,9 +51,9 @@ class FileStateCache:
             return False, "Error: file has been modified since last read. Read it again before editing."
 
         try:
-            if current_path.read_text(encoding="utf-8") != cached_content:
+            if self._read_text(current_path) != cached_content:
                 return False, "Error: file has been modified since last read. Read it again before editing."
-        except (OSError, UnicodeError):
+        except (OSError, ValueError):
             return False, "Error: cannot verify file contents. Read it again before editing."
 
         return True, ""
@@ -54,10 +62,10 @@ class FileStateCache:
         """Update the cache entry after a successful edit/write."""
         try:
             p = Path(path)
-            content = p.read_text(encoding="utf-8")
+            content = self._read_text(p)
             mtime_ns = p.stat().st_mtime_ns
             self._cache[path] = (content, mtime_ns)
-        except OSError:
+        except (OSError, ValueError):
             # If we can't read it back, just remove the stale entry.
             self._cache.pop(path, None)
 

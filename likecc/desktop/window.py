@@ -26,7 +26,8 @@ class ChatWindow(QMainWindow):
         self.lifecycle = None
         self._revision = -1
         self._pending_key = None
-        self._last_command = None
+        self._draft = None
+        self._reply = None
         self.setWindowTitle("DeskMate 桌伴")
         self.resize(920, 780)
         root = QWidget()
@@ -59,6 +60,9 @@ class ChatWindow(QMainWindow):
         self.transcript.setOpenExternalLinks(False)
         self.transcript.setOpenLinks(False)
         layout.addWidget(self.transcript, 1)
+        self.materials_summary = label("")
+        self.materials_summary.hide()
+        layout.addWidget(self.materials_summary)
         self.request_area = QScrollArea()
         self.request_area.setWidgetResizable(True)
         self.request_area.setMaximumHeight(250)
@@ -79,10 +83,10 @@ class ChatWindow(QMainWindow):
         layout.addWidget(self.feedback)
         self.send_button.clicked.connect(self.send)
         self.cancel_button.clicked.connect(lambda: controller.submit("cancel"))
-        self.new_button.clicked.connect(lambda: controller.submit("new"))
-        self.resume_button.clicked.connect(lambda: controller.submit("resume", session_id=self.sessions.currentData()))
+        self.new_button.clicked.connect(lambda: self._submit("new"))
+        self.resume_button.clicked.connect(lambda: self._submit("resume", session_id=self.sessions.currentData()))
         self.open_button.clicked.connect(self.open_workspace)
-        self.demo_button.clicked.connect(lambda: controller.submit("demo"))
+        self.demo_button.clicked.connect(lambda: self._submit("demo"))
         self.exit_button.clicked.connect(lambda: self.lifecycle.request_exit() if self.lifecycle else controller.submit("close"))
         self.timer = QTimer(self)
         self.timer.setInterval(50)
@@ -92,30 +96,43 @@ class ChatWindow(QMainWindow):
 
     def send(self):
         text = self.input.toPlainText().strip()
-        if text:
-            self.controller.submit("send", text=text)
-            self.input.clear()
+        if text and self._draft is None:
+            version = self.input.document().revision()
+            command_id = self._submit("send", text=text)
+            if command_id is not None:
+                self._draft = (command_id, version)
+                self.send_button.setEnabled(False)
+
+    def _submit(self, command, **data):
+        command_id = self.controller.submit_ui(command, **data)
+        if command_id is None and (self.lifecycle is None or not self.lifecycle.is_closing):
+            self.feedback.setText("待确认命令已满，请稍后重试。")
+        return command_id
 
     def open_workspace(self):
         values = asdict(self.options)
         values.update(work_dir=self.workspace.text(), provider=self.provider.text().strip() or None, demo=False)
-        self.controller.submit("open", **values)
+        self._submit("open", **values)
 
     def refresh(self):
         state = self.controller.snapshot()
-        if state["revision"] == self._revision:
+        receipts = self.controller.take_receipts()
+        if state["revision"] == self._revision and not receipts:
             return
         self._revision = state["revision"]
         idle = state["state"] == "idle"
         configurable = state["state"] in {"idle", "error"}
         for widget in (self.workspace, self.provider, self.open_button, self.demo_button):
             widget.setEnabled(configurable)
-        for widget in (self.send_button, self.input, self.new_button, self.resume_button, self.sessions):
+        for widget in (self.input, self.new_button, self.resume_button, self.sessions):
             widget.setEnabled(idle)
         self.cancel_button.setEnabled(state["state"] in {"running", "waiting"})
         names = {"starting": "启动中", "idle": "就绪", "running": "执行中", "waiting": "等待回复",
                  "cancelling": "取消中", "closing": "正在关闭资源", "closed": "已关闭", "error": "配置/启动错误"}
-        self.banner.setText(("离线演示 · 无模型网络请求 | " if state["demo"] else "真实模式 | ") + names[state["state"]])
+        self.banner.setText(("离线演示 · 无模型网络请求 | " if state["demo"] else "真实模式 · 资料整理 | ") + names[state["state"]])
+        self.input.setPlaceholderText("输入任务；离线演示会依次请求写文件、问答，可选择等待取消" if state["demo"] else
+            "提供公开网页 URL、工作区内的文本或 Markdown，以及要生成的 Markdown 路径")
+        self.show_materials(state.get("materials"))
         self.info.setText(f"工作区：{state['workspace']}\n模型：{state['provider']}\n会话：{state['session_id']}")
         selected = self.sessions.currentData()
         items = [(m["id"], f"{m['title'][:50]} ({m['count']}) · {m['id']}") for m in state["sessions"]]
@@ -141,15 +158,36 @@ class ChatWindow(QMainWindow):
         if pending_key != self._pending_key:
             self._pending_key = pending_key
             self.show_requests(state["pending"])
-        ack = state["command"]
-        if ack and ack["id"] != self._last_command:
-            self._last_command = ack["id"]
+        for ack in receipts:
+            if self._draft and ack["id"] == self._draft[0]:
+                if ack["accepted"] and self.input.document().revision() == self._draft[1]:
+                    self.input.clear()
+                self._draft = None
             # Application-level shutdown feedback takes priority over delayed replies.
             if self.lifecycle is None or not self.lifecycle.is_closing:
                 self.feedback.setText(("后端已接受：" if ack["accepted"] else "未接受：") + ack["message"])
-            if not ack["accepted"]:
-                for button in self.request_area.findChildren(QPushButton):
-                    button.setEnabled(True)
+            if self._reply and ack["id"] == self._reply[0]:
+                if not ack["accepted"] and self._reply[1] in pending_key:
+                    for button in self.request_area.findChildren(QPushButton):
+                        button.setEnabled(True)
+                self._reply = None
+        self.send_button.setEnabled(idle and self._draft is None)
+
+    def show_materials(self, summary):
+        self.materials_summary.setVisible(summary is not None)
+        if summary is None:
+            return
+        sources = {"read": "已读", "truncated": "截断", "failed": "失败", "interrupted": "中断"}
+        artifacts = {"written": "已写入，待回读", "verified": "已回读核对",
+                     "readback_failed": "回读未通过", "write_unverified": "写入未核实"}
+        lines = [f"{s['id']} {sources[s['status']]} · {s['target'][:130]}"
+                 for s in summary["sources"] if s["status"] in sources]
+        outputs = [f"{a['path'][:160]}（{artifacts[a['status']]}）" for a in summary["artifacts"]]
+        shown = lines[:4]
+        if len(lines) > len(shown):
+            shown.append(f"另有 {len(lines) - len(shown)} 项来源，详见工具记录。")
+        self.materials_summary.setText("来源\n" + ("\n".join(shown) or "本次尚无读取记录")
+                                       + "\n成果  " + ("；".join(outputs) or "本次尚无成果记录"))
 
     def show_requests(self, pending):
         old = self.request_area.takeWidget()
@@ -203,11 +241,14 @@ class ChatWindow(QMainWindow):
         self.request_area.setWidget(box)
 
     def reply(self, request, value):
+        command_id = self._submit("reply", session_id=request["session_id"], run_id=request["run_id"],
+                                  request_id=request["request_id"], value=value)
+        if command_id is None:
+            return
+        self._reply = (command_id, request["request_id"])
         for button in self.request_area.findChildren(QPushButton):
             button.setEnabled(False)
         self.feedback.setText("回复已发送，等待后端确认…")
-        self.controller.submit("reply", session_id=request["session_id"], run_id=request["run_id"],
-                               request_id=request["request_id"], value=value)
 
     def closeEvent(self, event):
         event.ignore()

@@ -1,6 +1,6 @@
 # 验证说明
 
-本页按阶段保留 LikeCC 0.2.0 和 DeskMate R1/R2/R3/R3.1 的实际结果。各阶段的“待确认”代表当时状态，最新自动化结果见文末“R3.1 Windows Shell 集成回归”。
+本页按阶段保留 LikeCC 0.2.0 和 DeskMate 各轮实际结果。各阶段的“待确认”代表当时状态，最新结果见文末 R4 验证。
 
 以下为 LikeCC 0.2.0 在 2026-09-22 完成的发布验证。测试使用本地 fake 模型、临时文件和临时 Git 仓库；不需要模型 API Key。
 
@@ -871,3 +871,168 @@ WSL 在 `/mnt/d/ldj/03/DeskMate` 激活已有 `cc`（Python 3.11.16），用同�
 Windows 完整回归的三个既有失败全部通过。六项跳过沿用既有测试条件，其中五项依赖 POSIX 进程组，一项需要 Windows 本机缺少的符号链接测试目标文件。WSL 相关测试包含实际 `pwd`、文件流程和 POSIX 进程组清理，92 项全部执行。上节的 WSL 821 passed 仍是上一阶段的完整回归记录。
 
 本轮的 Windows 验证覆盖选定的原生 Shell 工作区和文件流程。其他 POSIX 命令在 Windows 的可用性、通用子进程树清理及安装打包继续作为后续范围。使用已有 Windows Conda 和 WSL cc，测试跑离线脚本及临时文件。原 LikeCC 工作区复核干净，改动保留在 feat/deskmate 工作区，R4 仍处于规划阶段。
+
+## R4 资料整理验证（2026-11-18）
+
+工作区 `D:\ldj\03\DeskMate`，分支 `feat/deskmate`，起点 `19e5d6d74c8413b71088e4dea3be538da3b05151`。环境为 WSL2 Ubuntu 的 `cc` / Python 3.11.16，以及原生 Windows 10 的 `deskmate-win` / Python 3.12.7。两侧使用已有 PySide6 6.8.3、HTTPX 0.28.1 和锁定依赖。开始时有三份用户提供的未跟踪文档，保留其中两份原内容，目标规格仅更新完成状态。
+
+| 阶段 | 实际结果 |
+| --- | --- |
+| R4-0 修复前定向复现 | `test_stale_idle_send_preserves_rejected_draft` 与 `test_demo_cleanup_failure_can_retry_without_losing_directory` 均失败，11.10 秒。前者输入为空，后者状态为 `starting` |
+| R4-0 桌面回归 | WSL 46 passed，31.98 秒。后续补运行资源重试、独立回复额度与历史恢复断言，均纳入最终回归 |
+| R4 相关回归 | WSL 190 passed，42.96 秒。Windows 188 passed、2 skipped，81.64 秒。退出码均为 0 |
+| R4 最终 WSL 完整回归 | 853 passed、0 failed、0 skipped，58.56 秒，退出 0 |
+| R4 最终 Windows 完整回归 | 847 passed、0 failed、6 skipped，129.14 秒，退出 0 |
+| 独立检查 | WSL SubAgent 90/90，compileall、两个入口 `--help`、uv 锁检查、`git diff --check` 通过 |
+
+Windows 全量的六项既有跳过包括五项 POSIX/WSL 进程组契约和一项缺少符号链接测试目标文件。相关测试子集包含其中两项。两侧都用 offscreen Qt 和隔离的 pytest 临时目录，移除测试进程中的常见模型凭据变量，没有真实模型调用。最终 WSL pytest 输出目录为 `/tmp/deskmate-r4-wsl-full.wTCa6k`，Windows 日志在 `.r1-verification/r4-win-full-f0d53aa9e5314f64b193f7bd12b0c612/pytest.log`。WSL `/tmp` 为临时位置。
+
+### 实际运行方式
+
+WSL 在 `/mnt/d/ldj/03/DeskMate` 激活 `cc`。独立的测试根用 `mktemp -d` 创建，执行：
+
+```bash
+export QT_QPA_PLATFORM=offscreen PYTHONUTF8=1 PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+unset OPENAI_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN DEEPSEEK_API_KEY
+r=$(mktemp -d /tmp/deskmate-r4-wsl.XXXXXX)
+python -m pytest -q -rs --tb=short --basetemp "$r/tmp" -o "cache_dir=$r/cache"
+python tests/verify_subagent.py
+PYTHONPYCACHEPREFIX="$r/pyc" python -m compileall -q likecc examples
+python -m likecc --help
+python -m likecc.desktop --help
+uv lock --check --offline --default-index https://pypi.org/simple
+git diff --check
+```
+
+Windows 从仓库根目录执行同一 pytest 参数。每次新建 `$d`，实际用 `.r1-verification` 下的独立目录，并移除与 WSL 相同的凭据变量。
+
+```powershell
+$env:QT_QPA_PLATFORM = 'offscreen'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONNOUSERSITE = '1'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+Remove-Item Env:OPENAI_API_KEY,Env:ANTHROPIC_API_KEY,Env:ANTHROPIC_AUTH_TOKEN,Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
+$d = (New-Item -ItemType Directory -Path (Join-Path (Resolve-Path .r1-verification) ('r4-win-' + [guid]::NewGuid().ToString('N')))).FullName
+& D:\anaconda3\Scripts\conda.exe run --no-capture-output -n deskmate-win python -s -m pytest -q -rs --tb=short --basetemp (Join-Path $d 'tmp') -o "cache_dir=$d/cache"
+```
+
+相关回归在相同 pytest 参数末尾加入以下文件：
+
+```text
+tests/test_materials_workflow.py tests/test_desktop_controller.py tests/test_desktop_window.py
+tests/test_desktop_lifecycle.py tests/test_desktop_wait_state.py tests/test_desktop_launch.py
+tests/test_permissions.py tests/test_session_service.py tests/test_execution_contract.py tests/test_document_runtime.py
+```
+
+### 可观察证据和待验收范围
+
+- 离线 `python -m examples.deskmate_materials --work-dir <独立空目录>` 生成 `.r1-verification/r4-offline-Y0wZmt/outputs/study-plan.md`。三项来源为笔记、HTML、Markdown。结果为 `verified`，文件 SHA256 `caac8fa6479b1476afef5d2f5c578b30b327cc0a07f3f736d09d6d4869565009`。带 `--deny-write` 的运行没有产物。offscreen 测试使用真实控制器和假网页传输，核对隐藏时完成、恢复不重放，以及取消后流与传输退出。
+- 公开浏览确认两份 IANA 样例为静态 HTML。再试生产 FetchWebPage 时，WSL 在 DNS 检查阶段返回非公网目标错误。系统解析结果核对确认 Windows 与 WSL 都对候选域名返回 `198.18.0.0/15` 保留地址，未向这些地址发起 GET。没有更改 DNS、代理或工具的拒绝策略。
+- 独立公开验收工作区、未填密钥的 Provider 模板、源文件基线、非付费第一步及后续启动命令见 [R4 资料模式](deskmate-affairs.md)。真实 Provider 工具调用、可见 Qt 页面、真实结果总结质量和人工取消/恢复等待用户操作及本轮计费授权。锁文件、原 LikeCC 和暂存区保持原状态。
+
+### R4 真实网页验收前的 DNS 诊断
+
+2026-11-18 在 Codex 发起的非交互进程中，分别使用 WSL2 `cc`（Python 3.11.16）和 Windows `deskmate-win`（Python 3.12.7），从项目目录调用生产模块的 `resolve_host(host, 443)` 和 `public_ip(ip)`。两套解释器返回相同结果。用户随后在平时启动 GUI 的交互式 WSL 终端运行同一预检，确认使用 `/home/ldj/anaconda3/envs/cc/bin/python`，`www.iana.org` 返回 `198.18.1.67`，被同一生产地址校验拒绝。[预检命令](deskmate-affairs.md#真实人工验收的起点)
+
+| 域名 | WSL `cc` 和 Windows `deskmate-win` 的解析结果 | `public_ip` |
+| --- | --- | --- |
+| `www.iana.org`（两份验收材料） | `198.18.1.67` | 拒绝非公网网络目标 |
+| `www.rfc-editor.org`（对照） | `198.18.1.68` | 拒绝非公网网络目标 |
+| `example.org`（对照） | `198.18.1.71` | 拒绝非公网网络目标 |
+
+- WSL 使用自动生成的 `resolv.conf`，解析器端点为私有 IPv4，`/etc/hosts` 无 IANA 条目。两套探测进程均未继承常用 HTTP 代理变量，Windows 当前用户的 WinINET 系统代理及 PAC 未启用。
+- Windows 运行中的 Clash Verge Rev 版本为 2.4.1。`clash-verge.yaml` 的运行配置启用了 TUN、DNS 接管及 `enhanced-mode: fake-ip`，配置的 Fake-IP 范围包含 IANA 探测地址；`blacklist` 模式的过滤列表没有 `www.iana.org` 的匹配项。应用的全局 DNS 覆写开关未启用。配置和解析结果相互印证，指向本机 Clash Verge 的 Fake-IP 解析。日志只登记开关、模式及目标匹配情况。
+- 生产代码的 HTTPX client 设置 `trust_env=False`，允许的初始 URL 来自本轮用户输入并经过权限检查。每个连接和重定向都重新解析并校验地址，传输使用已校验 IP，HTTP Host 和 TLS SNI 保留域名，证书按默认策略校验。流和 client 由每跳的异步上下文关闭。
+- 在 Codex 发起的 WSL `cc` 中，文档版预检输出 `www.iana.org: 198.18.1.67` 并按预期退出 1。用 Node.js 对文档中的订阅脚本做了 4 项本地检查，覆盖精确追加、同域不重复、其他过滤模式及缺少 DNS 配置。实际客户端应用仍待操作。
+- 当前订阅脚本经核对为默认模板，按原字节备份并核验。用户在该订阅的脚本编辑器保存单域名过滤，确认界面未报错。随后读取生效配置确认 `www.iana.org` 恰有一条，另外 24 条过滤项仍在。TUN、DNS、`fake-ip` 和 `blacklist` 仍启用。复测使用文档中的同一 WSL `cc` 解释器和预检，返回 `104.18.24.232`、`104.18.25.232`、`2606:4700::6812:18e8`、`2606:4700::6812:19e8`，全部通过，退出 0。
+
+### R4 无模型实网检查
+
+2026-11-18 使用 WSL `cc`，通过 `Runtime` → `SessionService` → `PermissionChecker` → `FetchWebPage` 检查真实 HTTPS。探针的脚本化 client 只产生两条工具调用，不使用 Provider 账户或 API Key。会话明确提供两条 HTTPS URL，分别收到 `PermissionRequest` 并按该精确 URL 批准。生产工具沿用系统解析及默认 HTTPX 传输，探针仅记录实际响应、TLS 参数和关闭状态。实际命令退出 0：
+
+```bash
+cd /mnt/d/ldj/03/DeskMate
+conda activate cc
+PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 python - < .r1-verification/r4_web_acceptance.py
+```
+
+| 来源 | 输入及最终 URL | 标题 | HTTP 与正文 |
+| --- | --- | --- | --- |
+| `S1` | `https://www.iana.org/help/example-domains` | Example Domains | 200，`read`，1,244 字符，未截断 |
+| `S2` | `https://www.iana.org/domains/reserved` | IANA-managed Reserved Domains | 200，`read`，2,768 字符，未截断 |
+
+两页均直达，各一个 GET。传给 HTTPX 的连接目标均为 `104.18.24.232`，两次 HTTP Host、SNI 参数和实际 TLS 连接的主机名均为 `www.iana.org`。两次协商 TLS 1.3，证书及主机名验证开启。HTTPX 的 `trust_env=False` 和自动重定向关闭均得到确认。两个响应流和客户端正常关闭。实网重定向和实网中途取消本次未触发，离线对应测试见上文。
+
+本次新增可复现的本机验收脚本和文档，生产代码无变动。未重新执行完整 pytest 或 SubAgent，上文保留 R4 开发阶段实际执行结果。
+
+### R4 真实 Provider 桌面验收
+
+用户已明确授权单次 R4 真实 Provider 资料任务并接受实际用量计费。已核对样例工作区的 `deepseek-r4` 配置与 `deepseek-flash` 标识，`project_notes.md` 的 SHA256 与基线一致，目标 `outputs/project-summary.md` 尚不存在。
+
+用户确认在 WSL `cc` 启动的可见窗口已就绪，横幅为「真实模式 · 资料整理」，模型及独立样例工作区一致，聊天框为空。下一项检查从用户发送单次资料任务开始，目标为两份指定 IANA 页面、`project_notes.md` 和唯一产物 `outputs/project-summary.md`。真实工具调用与权限卡片待用户观察。
+
+用户提交任务后，截图显示资料面板登记 `S1 已读 · project_notes.md`，成果区尚无记录。第一张权限卡片显示 `FetchWebPage`，操作为 `https://www.iana.org/help/example-domains`，与授权任务一致。此时等待用户批准，网页读取结果尚未确认。
+
+批准第一张卡片后，用户截图确认 `S2 已读 · https://www.iana.org/help/example-domains`，工具输出区显示网页正文。第二张权限卡片显示 `FetchWebPage`，操作为 `https://www.iana.org/domains/reserved`。此时成果区仍无记录。
+
+批准第二张卡片后，用户截图确认 `S3 已读 · https://www.iana.org/domains/reserved`，`S1` 至 `S3` 均可见。`WriteFile` 权限卡片只申请 `outputs/project-summary.md`。同时在磁盘核对目标尚不存在，`project_notes.md` 的 SHA256 与基线一致。此时等待写入批准。
+
+批准写入后，用户截图显示运行 `completed`，窗口回到「就绪」，成果标记为「已回读核对」。只读检查会话 `session_20261118_211555_tpax` 确认工具记录恰好对应本地笔记读一次、两个 URL 各读一次、目标写入一次及目标回读一次，五条工具结果均成功。回读事件明确记录全文摘要一致。实际文件正文涵盖项目进度、两个行动项和 IANA 示例域名用途，三项正文引用与工具附加的来源一致。笔记未填写正式项目名，产物将名称标为暂称。
+
+退出重开前基线如下。在恢复原会话后，对照文件和原会话记录，检查是否有重复写入或新工具记录。
+
+| 路径或记录 | 字节数 | UTC 修改时间 | SHA256 |
+| --- | --- | --- | --- |
+| `project_notes.md` | 255 | `2026-11-18T08:50:32.877040+00:00` | `23f6d302affcc181428f7ccac9f7a3dc37fc78b838b01ba88dcbebeccd753988` |
+| `outputs/project-summary.md` | 1,486 | `2026-11-18T13:21:33.078257+00:00` | `3c2ed274eb8518c6077392eef65fef4026fbbb288fcf7a5282683e0106a4725a` |
+| `session_20261118_211555_tpax.jsonl` | 13,236 | `2026-11-18T13:21:35.766689+00:00` | `3d202c9cc1fafc4d08283009450148691aeff0e9ef24deb19ad9068d7a77f7c4` |
+
+用户确认点击「退出应用」后正常退出。关闭后只读复核三个路径的 SHA256、字节数及修改时间，均与上述基线一致。待用相同工作区重开并恢复原会话。
+
+用户确认使用相同命令重开后，窗口已就绪，Provider、模型与工作区一致，当前是新的空白会话。待从会话列表恢复 `session_20261118_211555_tpax`。
+
+用户选择原会话并点击「恢复所选会话」，确认 ID、原任务历史、原工具结果及就绪状态符合预期，没有新权限卡片。恢复后从磁盘复核，上表三个路径的 SHA256、字节数及修改时间均一致，原会话仍只有五次既有工具调用。这次恢复没有观察到网页读取或文件写入重放。
+
+### R4 收尾结论与覆盖边界
+
+2026-11-20 用户按连续验收清单操作后确认全部符合预期。新会话 `session_20261120_200239_zoyx` 的磁盘记录已复核，取消后重用、成果回读及退出恢复通过。实际阶段与证据见下表。[连续验收清单](deskmate-affairs.md#连续验收清单2026-11-20)
+
+| 检查 | 复核结果 |
+| --- | --- |
+| 权限等待时取消 | 用户确认卡片清空、回到就绪。首轮持久状态为 `cancelled`，网页工具记录中断 |
+| 批准访问后尝试取消 | 第二轮已成功读取网页并以 `completed` 结束，未捕捉到实际取消窗口 |
+| 同会话重新完成资料任务 | 第三轮 `completed`，本地笔记和单个网页各读一次，新摘要只写一次，再回读成功 |
+| 成果文件与来源 | `outputs/cancel-retry-summary.md` 共 895 字节，SHA256 为 `22a3789f4b31d2dfc28e2b65ac33618bf66faff9b4284dd314e9b554b82464e8`，两条来源与正文相符 |
+| 原文件保护 | `project_notes.md` 和 `outputs/project-summary.md` 的 SHA256 与 11 月 18 日基线一致 |
+| 退出与恢复 | 用户确认两次正常退出、退出码为 0、恢复历史与就绪状态正常。独立比对恢复前快照，7 个文件的 SHA256、大小和纳秒修改时间全部一致，包括新会话日志和新成果 |
+
+新会话保存了三个运行终态 `cancelled → completed → completed`，六条工具调用对应一条中断结果和五条成功结果。原中断调用已具有终结结果，后续工具调用和会话恢复没有重复执行记录。成功的文件调用参数使用 Windows 盘符绝对路径，本次桌面的具体启动解释器未独立采集。下面的只读审计在 WSL `cc` 中实际执行，退出 0，未发送模型或网页请求：
+
+```bash
+cd /mnt/d/ldj/03/DeskMate
+conda activate cc
+PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 python - < .r1-verification/r4_cancel_acceptance_audit.py
+```
+
+- 单次真实 DeepSeek `deepseek-r4` / `deepseek-flash` 资料任务与 WSLg 人工恢复通过。五次是会话日志中的工具调用数，未检查 Provider 账单或推断实际网络请求数。
+- 用户已手动完成真实 Provider 权限等待时取消和同会话重用。第二次任务在捕捉到取消前已完成，真实 HTTP 响应流读取期间的取消仍未覆盖。两页实际 HTTPS 已验证直达读取及正常关闭，实网重定向未触发。这两项保留为覆盖边界。
+- 11 月 18 日在 WSL `cc` 补跑下面三个离线测试，实际结果为 **3 passed，2.31 秒**，退出 0。使用 fake client、受控解析/传输和离线桌面控制器，覆盖取消后的资源释放与重用、拒绝迟到回复、每跳固定连接地址。完整 pytest 与 SubAgent 的历史结果仍为 WSL 853 通过、Windows 847 通过及 6 跳过、SubAgent 90/90。11 月 20 日只更新文档和只读审计脚本，未重新运行这些回归。
+- 本轮收尾改动为单域名本机过滤、忽略目录内的验收材料与探针、验收文档。生产网络、权限及 TLS 策略无修改。`git diff --check` 通过，分支仍为 `feat/deskmate`，HEAD 为 `19e5d6d74c8413b71088e4dea3be538da3b05151`，暂存区为空。
+
+```bash
+QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 \
+  python -m pytest -q -p no:cacheprovider \
+  tests/test_materials_workflow.py::test_permission_fetch_cancels_and_reuses_without_expanding_or_replaying \
+  tests/test_materials_workflow.py::test_redirect_pins_each_hop_and_extracts_safe_text \
+  tests/test_desktop_controller.py::test_permission_cancel_late_reply_rejected_and_next_run_works
+```
+
+### R4 提交前核对（2026-11-20）
+
+本次提交范围按 R3.1 基线 `19e5d6d74c8413b71088e4dea3be538da3b05151` 的完整差异确定，共 28 个源码、测试、示例和文档文件，包含 R4-0 的回执与草稿修复。三份原有未跟踪设计文档纳入版本记录，R3.1 审查报告保留其原始版本含义。个人配置、会话、验收产物和 `.r1-verification/` 中的辅助脚本留在本机。
+
+已获取远程 `feat/deskmate`，提交前本地与远程均为上述基线，分歧计数为 `0 0`，暂存区起初为空。WSL Git 的有效提交身份与上一提交一致，使用现有身份。依据完整工作区差异、开发记录和文件修改时间，最终完整回归之后只有文档与本机审计辅助文件变化。此轮补正 README 的 PowerShell 代码块和目标规格中的 R4 验收状态，生产代码与测试内容未修改。
+
+实际执行了 28 个候选文件的敏感信息及文件类型检查、19 个 Python 文件的 AST 解析、`git diff --check` 和忽略规则检查。WSL `cc` 再次运行本机只读验收审计，确认运行终态、单次写入、回读以及恢复快照中 7 个文件的哈希、大小、修改时间一致，退出 0。本次未重新执行 pytest 或 SubAgent，完整回归沿用上文明确标注的开发阶段结果。真实 HTTP 流内取消与实网重定向仍保留为覆盖限制。
+
+首次暂存检查发现两份新增文档头部的 Markdown 行末双空格被报告为尾随空白，已改用等效的反斜杠换行，原文字内容保留。提交前重新核对暂存路径、统计与差异格式。

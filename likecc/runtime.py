@@ -85,6 +85,8 @@ class Runtime:
         self._initializing = False
         self._close_task: asyncio.Task | None = None
         self._stop_task: asyncio.Task | None = None
+        self.retry_close_errors = False
+        self._failed_closers = None
         self.service = None
         self.extensions = None
 
@@ -184,7 +186,9 @@ class Runtime:
 
     async def aclose(self) -> None:
         """Stop children before clients; concurrent/repeated callers share one close."""
-        if self._close_task is None:
+        if self._close_task is None or (
+            self.retry_close_errors and self._close_task.done() and self._failed_closers
+        ):
             self._close_task = asyncio.create_task(self._close(), name="runtime-close")
         await finish_cleanup(self._close_task)
 
@@ -213,8 +217,14 @@ class Runtime:
             closers.append(self._agent_tool.aclose)
         if self.client is not None:
             closers.append(self.client.aclose)
-        for close in closers:
+        failed = []
+        for close in self._failed_closers if self._failed_closers is not None else closers:
             try:
                 await close()
             except Exception:
                 log.exception("Runtime resource cleanup failed")
+                failed.append(close)
+        if self.retry_close_errors:
+            self._failed_closers = failed
+            if failed:
+                raise RuntimeError(f"{len(failed)} runtime resource close operation(s) failed")

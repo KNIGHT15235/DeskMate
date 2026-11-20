@@ -8,7 +8,7 @@
 | R2 | 统一执行与会话服务 | 已完成并推送，见 R2 与 R3 基线记录 |
 | R3 | 桌面入口 | 已实现，后续边界修复和补充验收见 R3.1 |
 | R3.1 | 桌面边界修复与验收收尾 | WSLg 人工、DeepSeek 指定冒烟、Windows 离线真实托盘通过。两项收尾修复和 Shell 测试修正已完成，Windows 完整回归 815 通过、6 跳过 |
-| R4 | 个人事务流程 | 计划，未实现 |
+| R4 | 个人资料整理流程 | R4-0/A/B 实现，离线流程已跑通，真实 Provider 和可见桌面待验收 |
 | R5 | 持久任务与调度 | 计划，未实现 |
 | R6 | 个人记忆 | 计划，未实现 |
 | R7 | 主动通知与交互 | 计划，未实现 |
@@ -298,3 +298,20 @@ Windows deskmate-win 和 WSL cc 的桌面专项各 42 passed。WSL 完整回归 
 ### R3.1 Windows Shell 集成回归补记（2026-11-18）
 
 先复现三个失败并确认 Windows 默认 `cmd.exe` 的行为。两项 Worktree 测试改用原生的工作目录查询命令，文件流程按目标系统构造 Python 校验参数。保持生产 Shell、工作目录传递及 POSIX 进程组逻辑。Windows 相关测试 87 passed、5 skipped，完整回归 815 passed、6 skipped、0 failed。WSL 受影响测试 92 passed。完整命令和诊断见 [verification.md](verification.md) 文末。
+
+## R4 个人资料整理（2026-11-18）
+
+基线 `19e5d6d74c8413b71088e4dea3be538da3b05151`，分支 `feat/deskmate`。开工时已有三个用户提供的文档处于未跟踪状态，保留 R3.1 审查和 R4 提示词，目标规格仅更新进度。
+
+| 检查点 | 实际交付 |
+| --- | --- |
+| R4-0 | 有界命令回执按 ID 消费，保护草稿版本和关闭提示。切换失败进入可恢复错误状态，分别保留失败的资源和待删除的临时目录 |
+| R4-A | 正常桌面装配资料身份、限额文件工具和指定公网 URL 工具。锁定源地址后保留 Host 和 TLS 名称；每跳重新校验。来源记录随任务重置 |
+| R4-B | SessionService 驱动原 Agent 循环，审批后写 Markdown，工具追加来源账目，回读摘要一致后更新成果面板。离线示例与拒绝写入实验可运行 |
+| R4-C | 相关和完整回归已记录，两份 IANA 实网读取、真实 Provider 资料任务、产物回读和会话恢复通过。11 月 20 日补充通过权限等待取消后的同会话重用 |
+
+调用链为 `ChatWindow → DesktopController → SessionService/RunHandle → Agent → PermissionChecker/Interaction → ReadFile/FetchWebPage/WriteFile → RunEvent → 界面摘要`。来源及成果状态属于本次运行。持久会话保留工具历史，文件保留工具追加的来源账目。
+
+R4-C 收尾在 Codex 发起的 WSL `cc` 和 Windows `deskmate-win` 以及用户平时启动 GUI 的 WSL 终端复现 Fake-IP 地址拒绝。原脚本备份后，用户在 Clash Verge Rev 2.4.1 的当前订阅应用单域名过滤。WSL `cc` DNS 复测和两份验收页面的无模型真实 HTTPS 读取通过。用户在可见窗口批准两次网页读取及一次写入，单次真实 Provider 任务完成，产物和回读证据已核实。退出重开并恢复原会话后，用户确认状态正确，磁盘文件和会话日志与退出前一致。[R4 验证记录](verification.md#r4-真实网页验收前的-dns-诊断)
+
+2026-11-20 用户确认连续验收结果正常。新会话日志复核为 `cancelled → completed → completed`，确认取消后可继续使用同一会话。新产物只写一次并完成回读，退出恢复前后 7 个文件的哈希、大小和修改时间一致。R4 核心功能与人工主流程验收完成。实际 HTTP 响应流期间取消、实网重定向保留为覆盖边界。R5 仍是后续计划，设计独立于桌面进程的持久任务与调度。R6–R8 范围沿用目标规格。

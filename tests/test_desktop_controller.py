@@ -39,6 +39,83 @@ def reply(controller, value):
                    request_id=pending["request_id"], value=value)
 
 
+def test_demo_cleanup_failure_can_retry_without_losing_directory(monkeypatch):
+    from likecc.desktop import controller
+
+    original = controller.TemporaryDirectory
+    attempts = []
+
+    class FailsOnce(original):
+        def cleanup(self):
+            attempts.append(self.name)
+            if len(attempts) == 1:
+                raise PermissionError("temporarily locked demo directory")
+            super().cleanup()
+
+    monkeypatch.setattr(controller, "TemporaryDirectory", FailsOnce)
+    c = DesktopController(DesktopOptions(demo=True))
+    try:
+        root = Path(wait(c, lambda s: s["state"] == "idle")["workspace"]).parent
+        assert not command(c, "demo")["accepted"]
+        error = c.snapshot()
+        assert error["state"] == "error" and not error["workspace"]
+        assert any("temporarily locked" in row["text"] for row in error["rows"])
+        assert root.is_dir()
+        assert command(c, "demo")["accepted"]
+        second = Path(wait(c, lambda s: s["state"] == "idle")["workspace"]).parent
+        assert not root.exists()
+    finally:
+        close(c)
+    assert not second.exists()
+
+
+def test_runtime_close_failure_keeps_demo_until_retry():
+    failures = []
+
+    class FailsOnce(Runtime):
+        async def initialize(self, *args, **kwargs):
+            await super().initialize(*args, **kwargs)
+            original = self.client.aclose
+
+            async def close_client():
+                if not failures:
+                    failures.append(True)
+                    raise OSError("client still open")
+                await original()
+
+            self.client.aclose = close_client
+
+    c = DesktopController(DesktopOptions(demo=True), runtime_factory=FailsOnce)
+    try:
+        root = Path(wait(c, lambda s: s["state"] == "idle")["workspace"]).parent
+        assert not command(c, "demo")["accepted"]
+        state = c.snapshot()
+        assert state["state"] == "error" and root.is_dir()
+        assert any("运行资源尚未关闭" in row["text"] for row in state["rows"])
+        assert command(c, "demo")["accepted"]
+        assert not root.exists()
+    finally:
+        close(c)
+
+
+def test_ui_receipt_capacity_preserves_acknowledgements_and_close():
+    from likecc.desktop.controller import MAX_RECEIPTS
+
+    c = DesktopController(DesktopOptions(demo=True))
+    try:
+        wait(c, lambda s: s["state"] == "idle")
+        ids = [c.submit_ui("invalid-command") for _ in range(MAX_RECEIPTS)]
+        assert all(ids) and c.submit_ui("new") is None
+        reply_id = c.submit_ui("reply")
+        assert reply_id is not None and c.submit_ui("reply") is None
+        wait(c, lambda s: s["command"] and s["command"]["id"] == reply_id)
+        assert [ack["id"] for ack in c.take_receipts()] == [*ids, reply_id]
+        assert c.submit_ui("new") is not None
+    finally:
+        c.request_close()
+        assert c.wait_closed()
+
+
 @pytest.mark.parametrize("allow", [True, False])
 def test_worker_owns_resources_and_demo_uses_real_service(allow, monkeypatch):
     observations = []

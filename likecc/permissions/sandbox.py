@@ -14,9 +14,12 @@ class PathSandbox:
         self,
         project_root: str,
         extra_allowed: list[str] | None = None,
+        *, allow_system_temp: bool = True,
     ) -> None:
         root = Path(project_root).resolve()
-        self._allowed_roots: list[Path] = [root, Path(tempfile.gettempdir()).resolve()]
+        self._allowed_roots: list[Path] = [root]
+        if allow_system_temp:
+            self._allowed_roots.append(Path(tempfile.gettempdir()).resolve())
         if extra_allowed:
             for p in extra_allowed:
                 self._allowed_roots.append(Path(p).resolve())

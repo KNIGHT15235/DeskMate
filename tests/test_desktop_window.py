@@ -148,6 +148,120 @@ def test_gui_wait_cancel_remains_responsive_and_can_send_again(qtapp):
         w.deleteLater()
 
 
+def test_stale_idle_send_preserves_rejected_draft(qtapp):
+    from test_desktop_controller import command, wait
+
+    c = DesktopController(DesktopOptions(demo=True))
+    w = ChatWindow(c, DesktopOptions(demo=True))
+    w.timer.stop()
+    try:
+        wait(c, lambda s: s["state"] == "idle")
+        w.refresh()
+        command(c, "send", text="already running")
+        wait(c, lambda s: s["state"] == "waiting")
+        w.input.setPlainText("keep this draft")
+        w.send()
+        wait(c, lambda s: not s["command"]["accepted"])
+        w.refresh()
+        assert w.input.toPlainText() == "keep this draft"
+    finally:
+        c.request_close()
+        assert c.wait_closed()
+        w.deleteLater()
+
+
+def test_materials_profile_finishes_while_window_hidden_and_shows_verified_file(qtapp, tmp_path, monkeypatch):
+    from test_desktop_controller import command, reply, wait
+    from examples.deskmate_materials import fixture_resolver, fixture_transport, StudyClient, PAGES, OUTPUT
+    from likecc.affairs import install_materials_profile
+    from likecc.config import AppConfig, ProviderConfig
+    from likecc.desktop import controller
+    from likecc.runtime import Runtime
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "project_notes.md").write_text("study notes", encoding="utf-8")
+    provider = ProviderConfig("fake-r4", "anthropic", "http://unused.invalid", "fake", api_key="offline-placeholder")
+    connections = []
+
+    def transport():
+        connections.append(True)
+        return fixture_transport()
+
+    monkeypatch.setattr(controller, "load_config", lambda **_: AppConfig([provider]))
+    monkeypatch.setattr(controller, "install_materials_profile", lambda runtime: install_materials_profile(
+        runtime, resolver=fixture_resolver, transport_factory=transport))
+
+    def runtime_factory(**kwargs):
+        return Runtime(**{**kwargs, "client_factory": lambda _: StudyClient(), "user_home": tmp_path / "home"})
+
+    options = DesktopOptions(work_dir=str(workspace))
+    c = DesktopController(options, runtime_factory=runtime_factory)
+    w = ChatWindow(c, options)
+    w.show()
+    try:
+        spin(lambda: w.send_button.isEnabled())
+        assert "资料整理" in w.banner.text() and "Markdown" in w.input.placeholderText()
+        w.input.setPlainText(f"整理 project_notes.md、{PAGES[0]} 和 {PAGES[1]} 到 {OUTPUT}")
+        w.send_button.click()
+        for url in PAGES:
+            wait(c, lambda s: s["pending"] and s["pending"][0]["description"] == url)
+            w.refresh()
+            button = w.findChild(QPushButton, "allow")
+            assert button.isEnabled()
+            button.click()
+        permission = wait(c, lambda s: s["pending"] and s["pending"][0]["tool_name"] == "WriteFile")
+        assert not permission["materials"]["artifacts"]
+        w.hide()
+        assert reply(c, "allow")["accepted"]
+        wait(c, lambda s: s.get("last_status") == "completed")
+        artifact = workspace / OUTPUT
+        contents = artifact.read_bytes()
+        mtime = artifact.stat().st_mtime_ns
+        w.show()
+        w.refresh()
+        assert "已回读核对" in w.materials_summary.text()
+        assert all(source in w.materials_summary.text() for source in PAGES)
+        session = c.snapshot()["session_id"]
+        assert command(c, "new")["accepted"]
+        assert command(c, "resume", session_id=session)["accepted"]
+        assert len(connections) == 2 and artifact.read_bytes() == contents and artifact.stat().st_mtime_ns == mtime
+    finally:
+        c.request_close()
+        assert c.wait_closed()
+        w.deleteLater()
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_single_send_consumes_its_receipt_even_with_later_ack(qtapp, edit):
+    from test_desktop_controller import wait
+
+    c = DesktopController(DesktopOptions(demo=True))
+    w = ChatWindow(c, DesktopOptions(demo=True))
+    w.timer.stop()
+    try:
+        wait(c, lambda s: s["state"] == "idle")
+        w.refresh()
+        w.input.setPlainText("first draft")
+        w.send()
+        w.send()
+        assert not w.send_button.isEnabled()
+        if edit:
+            w.input.setPlainText("new version")
+        wait(c, lambda s: s["state"] == "waiting")
+        later = c.submit_ui("new")
+        wait(c, lambda s: s["command"]["id"] == later)
+        w.refresh()
+        assert w.input.toPlainText() == ("new version" if edit else "")
+        assert sum(r["kind"] == "user" for r in c.snapshot()["rows"]) == 1
+        assert "未接受" in w.feedback.text()
+        assert c.take_receipts() == []
+    finally:
+        c.request_close()
+        assert c.wait_closed()
+        w.deleteLater()
+
+
 def test_all_ask_schema_types_and_name_mapping(qtapp):
     from PySide6.QtWidgets import QCheckBox, QWidget
     from likecc.client import LLMClient
