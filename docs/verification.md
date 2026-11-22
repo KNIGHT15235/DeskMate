@@ -1,6 +1,6 @@
 # 验证说明
 
-本页按阶段保留 LikeCC 0.2.0 和 DeskMate 各轮实际结果。各阶段的“待确认”代表当时状态，最新结论见文末 [DeskMate R5 人工验收报告](#deskmate-r5-人工验收报告2026-11-22)。
+本页按阶段保留 LikeCC 0.2.0 和 DeskMate 各轮实际结果。各阶段的“待确认”代表当时状态；人工证据见 [R5 人工验收报告](#deskmate-r5-人工验收报告2026-11-22)，最新代码结果见文末 [独立仓库审查修复](#r5-独立仓库提交前审查修复2026-11-22)。
 
 以下为 LikeCC 0.2.0 在 2026-09-22 完成的发布验证。测试使用本地 fake 模型、临时文件和临时 Git 仓库；不需要模型 API Key。
 
@@ -1510,3 +1510,36 @@ python -s -X utf8 -m pytest -q -ra -p no:cacheprovider --basetemp=<全新临时�
 ```
 
 本次日志与 JUnit 报告在源码库外保存。R5 状态按上文最终人工验收报告区分：离线回归、Windows 可见验收和真实 DeepSeek 指定主流程分别成立；真实拒绝写入仍为用户跳过的未完成项，不扩大为所有平台或崩溃场景人工通过。
+
+## R5 独立仓库提交前审查修复（2026-11-22）
+
+用户指定后续开发只在 `D:\ldj\03\DeskMate-Standalone`（WSL `/mnt/d/ldj/03/DeskMate-Standalone`）进行。修复前工作区干净，分支 `main`，HEAD `4da6c962eb0b4bbe90f70068ea776adeb7149b43`；controller、affairs、scheduling、runtime、service 及桌面调度测试与原审查版本逐文件一致。原 DeskMate 的 `feat/deskmate` / `0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a` 保持原未提交状态，未在原目录开发或提交。
+
+本轮修复以下三个已复现问题：
+
+| 审查问题 | 修复与定向证据 |
+| --- | --- |
+| P1：初始上下文绕过材料清单 | Runtime.initialize 增加默认兼容的 load_instruction_files 开关，定时任务显式关闭；项目、隐藏目录及用户目录的指令/include 不再隐式读取。回归同时证明前台行为保留，明确列入材料的 LIKECC.md 仅按普通文本读取，越界 include 目标仍被拒绝 |
+| P1：部分写入报错未阻止下个周期 | 在真正变更文件之前记录 write_unverified 与预期摘要；前置拒绝不伪造副作用，不抹掉此前 verified。全文回读一致可消除未知，否则终态 interrupted，扫描和领取均阻止后续周期。真实 SQLite 重开保留线索，明确重试保持唯一且需要单次模型确认；旧版 write_failed 保守转为待核对，原证据与标识不变 |
+| P2：启动关联落盘失败残留运行句柄 | 先取消刚创建的 RunHandle，再保存中断及 session/run 线索、关闭 Runtime、释放运行句柄。故障用例证明该次零模型调用、另一任务可正常开始且不重复；若恢复落盘或关闭再次失败，保持 error、停止领取，重开恢复 |
+
+新增 `tests/test_schedule_review_regressions.py`，并扩展资料及存储回归。最初四个定向用例在修复前均失败，修复后四项通过；补齐边界后的相关集合 107 passed / 48.96s，旧记录兼容补充后存储集合 19 passed / 4.63s。全套比迁移基线增加 12 项，用例未削弱原断言。
+
+| 本轮实际验证 | 结果 |
+| --- | --- |
+| WSL cc，完整离线套件 | 903 passed，0 skipped，120.78s，退出 0 |
+| Windows deskmate-win，完整离线套件 | 897 passed、6 skipped，144.62s，退出 0；无失败或错误 |
+| SubAgent | Windows 与 WSL 均 90/90，退出 0 |
+| CLI / desktop 两个入口帮助 | 两平台均退出 0；在各自临时工作目录运行 |
+| AST / 内存编译 | 两平台各 192 个 Python 文件通过，不生成 pyc；导入路径断言指向新副本 |
+| Git diff --check / 暂存区 | 通过 / 空；12 项修改或新增文件，HEAD 不变 |
+
+测试证据根目录为仓库外 `C:\Users\28436\AppData\Local\Temp\deskmate-r5-fixes-e4eb1980`，包含 before/after/related/legacy、full-win、full-win-isolated、full-win-final、full-wsl XML/log 及 win/wsl 的支持检查 JSON/log。最终 Windows 报告为 full-win-final.xml/log，WSL 为 full-wsl.xml/log。WSL 测试数据库使用独立 `/tmp/deskmate-r5-fixes-e4eb1980`，未与 Windows 共写任务库。全套只使用离线模型、可控时钟、临时数据库及隔离子进程，没有真实 Provider 调用。
+
+验证过程中的环境问题单独保留：WSL 在受限沙箱报 E_ACCESSDENIED 后，经本机执行通道重试成功。Windows 首轮 896 passed、6 skipped、1 failed / 173.47s，失败是旧 CLI 帮助用例在源码根目录写 debug.log 被沙箱拒绝。改在临时 CWD 后第二轮 895 passed、6 skipped、2 failed / 160.68s：旧并发读测试依赖 CWD 的 README.md/pyproject.toml，另有子进程未继承 UTF-8 导致中文安装提示解码失败。随后仅调整测试运行配置：把这两份公开文件复制到临时 CWD，并设置 PYTHONUTF8=1；未修改产品代码或放宽断言来绕过环境问题。支持检查脚本也使用独立 CWD，WSL 缺少 rg 时回退文件枚举。
+
+校正配置后两项环境用例先单独通过（2 passed / 17.26s），再运行完整 Windows 套件得到上表最终结果。最终运行以临时目录为 CWD，PYTHONPATH 指向新副本，pytest 通过绝对路径指定副本的 pyproject.toml、rootdir 和 tests；六项跳过仍为五项 POSIX 进程组及一项无合适系统文件的符号链接测试。没有新增跳过。另将原 DeskMate 中本次涉及的七个源码/测试文件与副本 HEAD 基线作换行规范化后比对，全部一致，证据为 original-code-check.json。
+
+结论：本次审查的两项 P1 和一项 P2 均已修复，定向回归、相关边界及双平台完整离线回归通过；未发现这三项仍阻塞提交的问题。修改保留在独立副本工作区，实际提交与推送另行进行。
+
+本轮未重新进行可见桌面或真实 Provider 验收，原真实拒绝写入缺口仍保留。一次性/每周、Asia/Shanghai/UTC、本地单调度器、禁止 Windows/WSL 同库并发，以及未知写入不承诺无损恢复或自动重放的限制保持。不暂存、不提交、不推送，不启动 R6。

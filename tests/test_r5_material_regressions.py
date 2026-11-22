@@ -4,7 +4,7 @@ import httpx
 import pytest
 from markdown_it import MarkdownIt
 
-from likecc.affairs import MaterialsWorkflow, MaterialWrite
+from likecc.affairs import MaterialsWorkflow, MaterialRead, MaterialWrite
 from likecc.permissions.rules import Rule, RuleEngine
 from likecc.tools.fetch_web_page import FetchWebPage, FetchParams
 from likecc.tools.work_dir import tool_working_directory
@@ -65,3 +65,25 @@ async def test_empty_web_is_limitation_and_cannot_be_cited(tmp_path, body, media
         allowed = await tool.execute(tool.params_model(file_path="out.md", content="限制：网页无可用正文。"))
         assert not allowed.is_error
     assert "S1 · empty" in (tmp_path / "out.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_rejected_write_preflight_does_not_invent_or_erase_side_effects(tmp_path):
+    output = tmp_path / "out.md"
+    output.write_text("original", encoding="utf-8")
+    workflow = MaterialsWorkflow(tmp_path, RuleEngine())
+    read, write = MaterialRead(workflow), MaterialWrite(workflow)
+    with tool_working_directory(tmp_path):
+        rejected = await write.execute(write.params_model(file_path="out.md", content="unread overwrite"))
+        assert rejected.is_error
+        assert not workflow.artifacts and not workflow.write_intents
+        assert output.read_text(encoding="utf-8") == "original"
+        assert not (await read.execute(read.params_model(file_path="out.md"))).is_error
+        assert not (await write.execute(write.params_model(file_path="out.md", content="# verified [S1]"))).is_error
+        assert not (await read.execute(read.params_model(file_path="out.md"))).is_error
+        before = output.read_bytes()
+        workflow.cache.clear()
+        rejected = await write.execute(write.params_model(file_path="out.md", content="second unread overwrite"))
+        assert rejected.is_error and output.read_bytes() == before
+        assert workflow.artifacts["out.md"]["status"] == "verified"
+        assert workflow.write_intents["out.md"]["status"] == "written"

@@ -179,6 +179,61 @@ def test_unknown_side_effect_blocks_later_cycles_until_explicit_review(tmp_path)
         store.close()
 
 
+def test_queued_cycle_rechecks_unknown_previous_result_when_claimed(tmp_path):
+    clock = Clock()
+    store = ScheduleStore(tmp_path, clock=clock)
+    try:
+        store.save(replace(reminder(clock, repeat="weekly"), kind="execute", outputs=["out.md"], model_policy="allow"))
+        clock.advance(hours=2)
+        store.scan()
+        old, = store.executions()
+        assert store.start(old["id"])
+        clock.advance(days=7)
+        store.scan()
+        queued = next(row for row in store.executions() if row["id"] != old["id"])
+        assert queued["status"] == "queued"
+        store.update(old["id"], status="interrupted")
+        assert not store.start(queued["id"])
+        assert store.execution(queued["id"])["status"] == "blocked_review"
+        assert store.execution(queued["id"])["started_at"] is None
+        store.retry(old["id"])
+        new = next(row for row in store.executions() if row["retry_of"] == old["id"])
+        store.approve_model(new["id"])
+        assert store.start(new["id"])
+        assert not store.start(new["id"])
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("intent", ["write_failed", "write_unverified", "written"])
+def test_legacy_write_errors_require_review_without_erasing_history(tmp_path, intent):
+    clock = Clock()
+    store = ScheduleStore(tmp_path, clock=clock)
+    spec = replace(reminder(clock, repeat="weekly"), kind="execute", outputs=["out.md"], model_policy="allow")
+    store.save(spec)
+    clock.advance(hours=2)
+    store.scan()
+    old, = store.executions()
+    evidence = {"artifacts": [], "write_intents": {"out.md": {"status": intent, "digest": "old-digest"}}}
+    ended = clock().isoformat()
+    store.update(old["id"], status="completed", ended_at=ended, evidence=evidence,
+                 session_id="old-session", run_id="old-run")
+    store.close()
+    reopened = ScheduleStore(tmp_path, clock=clock)
+    try:
+        row = reopened.execution(old["id"])
+        assert row["status"] == ("completed" if intent == "written" else "interrupted")
+        assert row["due_at"] == old["due_at"] and row["snapshot"] == old["snapshot"]
+        assert row["evidence"] == evidence and row["ended_at"] == ended
+        assert row["session_id"] == "old-session" and row["run_id"] == "old-run"
+        clock.advance(days=7)
+        reopened.scan()
+        later = next(r for r in reopened.executions() if r["id"] != old["id"])
+        assert later["status"] == ("queued" if intent == "written" else "blocked_review")
+    finally:
+        reopened.close()
+
+
 @pytest.mark.parametrize("text,expected", [
     ("明天晚上七点十五分提醒我", "19:15:00"),
     ("明天早上七点半提醒我", "07:30:00"),

@@ -512,7 +512,9 @@ class DesktopController:
                 client_factory=self._runtime._client_factory)
             self._scheduled_runtime = runtime
             runtime.retry_close_errors = True
-            await runtime.initialize(self._runtime.provider)
+            # The snapshot's material list also bounds the initial model input.
+            # LIKECC.md / @include must not read unconfirmed files implicitly.
+            await runtime.initialize(self._runtime.provider, load_instruction_files=False)
             self._scheduled_affairs = install_materials_profile(runtime)
             extensions = RuntimeExtensions(runtime, ExtensionOptions(interactive_tools=True))
             await extensions.initialize()
@@ -536,10 +538,27 @@ class DesktopController:
             self._row("user", prompt)
             self._consumer = asyncio.create_task(self._consume(self._run))
         except BaseException:
-            self._store.update(row["id"], status="interrupted", ended_at=stamp(self._clock()),
-                reason="定时运行启动中断，请查看会话及成果后明确重试")
-            if self._scheduled_runtime:
-                await self._scheduled_runtime.aclose()
+            try:
+                try:
+                    # Cancel the handle before yielding to Runtime cleanup. A
+                    # newly created task must not start the model after its link
+                    # failed to persist, nor remain as a stale dispatcher lock.
+                    links = {}
+                    if self._run is not None:
+                        links = {"session_id": self._run.session_id, "run_id": self._run.run_id}
+                        await self._run.cancel()
+                    self._store.update(row["id"], status="interrupted", ended_at=stamp(self._clock()),
+                        reason="定时运行启动中断，请查看会话及成果后明确重试", **links)
+                finally:
+                    if self._scheduled_runtime:
+                        await self._scheduled_runtime.aclose()
+            except BaseException as cleanup_error:
+                # Retain ownership/resources for _release() to retry. Publishing
+                # idle here would allow dispatch with an unknown database state.
+                self._set(state="closing" if self._closing else "error", pending=[],
+                    scheduler_error=f"启动恢复或资源关闭失败：{cleanup_error}；停止后续执行，请重新打开工作区")
+                raise
+            self._run = self._consumer = None
             self._restore_foreground()
             raise
 
@@ -554,10 +573,14 @@ class DesktopController:
     async def _finish_scheduled(self, run):
         self._save_evidence()
         summary = self._scheduled_affairs.summary()
-        status = "interrupted" if self._closing else run.status
+        uncertain_write = any(intent["status"] == "write_unverified"
+            for intent in self._scheduled_affairs.write_intents.values())
+        status = "interrupted" if self._closing or uncertain_write else run.status
         outputs = summary["artifacts"]
         reason = ("应用退出中断，请核对已有成果再明确重试。" if self._closing else
             "运行结束；" + ("成果状态见回读证据。" if outputs else "没有已写入的成果。"))
+        if uncertain_write:
+            reason = "写入可能已部分或全部发生，结果尚未核实；请核对会话、成果和磁盘后明确重试。"
         if self._evidence_errors:
             reason += "存在工具拒绝或失败，详见本次证据。"
         self._store.update(self._execution_id, status=status, ended_at=stamp(self._clock()), reason=reason)

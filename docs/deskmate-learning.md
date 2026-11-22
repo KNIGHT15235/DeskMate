@@ -558,3 +558,11 @@ UI1 中用户实际看到主窗口标题栏在屏幕外、无法拖动。`Deskto
 `ScheduleStore.cancel()` 停止未来周期，已完成执行仍为 completed/verified。重开后 `SessionService.new_session()` 会增加一个空会话；这不等于重放任务。实际对照同时检查三个旧 RUN_STATE 的 run_id 未变、新会话没有 RUN_STATE、八个原文件的哈希/大小/mtime 不变，才支持“正常重启未重复执行”的结论。
 
 界面中的“取消运行”与 WriteFile 卡片的“拒绝”代表不同结果。本次用户在写入权限等待时取消，持久记录正确为 cancelled；尽管目标文件没有生成，也不能据此把拒绝写入验收记为通过。该真实案例最后由用户选择跳过，自动化拒绝用例与真实取消案例分别保留各自结论。
+
+### 提交前审查补充：授权与失败边界
+
+`ExecutionScope.check()` 只覆盖工具调用，不能阻止 `Runtime.initialize()` 提前通过 `load_instructions()` 读取文件。定时运行现在显式传入 `load_instruction_files=False`，从输入装配阶段关闭隐式 LIKECC/include 读取；用户确认的指令文件可以作为普通材料交给 ReadFile，内容中的 include 不会被执行。前台的默认指令行为仍保留。
+
+`WriteFile._write_text()` 是经过读取与备份前置检查后的目标变更边界。`MaterialWrite._write_text()` 在此保存未知写入意图及预期摘要，再调用实际写入；不能把 `write_text()` 抛出异常解释成文件没有变化。写入失败后仍可由 `MaterialRead.execute()` 的全文摘要一致证明结果；否则 `_finish_scheduled()` 将执行标为 interrupted。`ScheduleStore.start()` 再次检查旧次中断，使已排队的下一周期同样受保护。旧版无法区分部分写入的 write_failed 也在 recover 中要求核对，历史证据原样保留。
+
+`DesktopController._start_scheduled()` 的失败清理先直接调用 `RunHandle.cancel()`，确保任务尚未获得事件循环执行机会时就设置取消标记；只等待 Runtime 的异步关闭可能先让模型任务开始。成功清理后同时释放控制器的运行句柄；恢复落盘或关闭失败时保留错误状态，不能发布 idle。这同时保护了计费调用边界和后续任务的可调度性。

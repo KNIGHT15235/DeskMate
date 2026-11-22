@@ -205,6 +205,9 @@ class MaterialRead(ReadFile):
                 workflow.checkpoint()
                 return ToolResult(f"回读与本次写入不一致：{local}", True)
             artifact["status"] = "verified"
+            if local in workflow.write_intents:
+                # A full matching readback can resolve an uncertain write result.
+                workflow.write_intents[local]["status"] = "written"
             workflow.checkpoint()
             return ToolResult(f"成果已回读核对（全文摘要一致）：{local}\n{body}")
         source = workflow.record("file", local, "truncated" if truncated else "read", time=FetchWebPage._time())
@@ -215,6 +218,17 @@ class MaterialWrite(WriteFile):
     def __init__(self, workflow):
         self.workflow = workflow
         super().__init__(file_state_cache=workflow.cache)
+
+    def _write_text(self, path, content):
+        workflow = self.workflow
+        local = path.relative_to(workflow.documents.root).as_posix()
+        # Record uncertainty only after read-before-write and backup checks.
+        # Opening/truncating the target can mutate it even if write_text raises.
+        workflow.write_intents[local] = {"status": "write_unverified", "digest": digest(content)}
+        workflow.artifacts[local] = {"status": "write_unverified", "digest": digest(content)}
+        workflow.cache.forget(str(path))
+        workflow.checkpoint()
+        super()._write_text(path, content)
 
     async def execute(self, params):
         workflow = self.workflow
@@ -235,15 +249,10 @@ class MaterialWrite(WriteFile):
                 raise ValueError("Markdown 成果超过 128 KiB")
         except (ValueError, RuntimeError, OSError) as exc:
             return ToolResult(str(exc), True)
-        # Persist a conservative clue BEFORE a write can have side effects.
-        workflow.write_intents[local] = {"status": "write_unverified", "digest": digest(text)}
-        if local in workflow.artifacts:
-            workflow.artifacts[local]["status"] = "write_unverified"
-        workflow.checkpoint()
         result = await super().execute(params.model_copy(update={"file_path": str(path), "content": text}))
         if result.is_error:
-            workflow.write_intents[local]["status"] = "write_failed"
-            workflow.checkpoint()
+            # Keep a possible partial write unknown. A preflight rejection never
+            # reached _write_text and must not erase earlier verified evidence.
             return result
         workflow.write_intents[local]["status"] = "written"
         workflow.artifacts[local] = {"status": "written", "digest": digest(text)}

@@ -94,7 +94,8 @@ class Runtime:
     def closed(self) -> bool:
         return self._close_task is not None
 
-    async def initialize(self, provider: ProviderConfig, *, resolve_context: bool = False) -> None:
+    async def initialize(self, provider: ProviderConfig, *, resolve_context: bool = False,
+                         load_instruction_files: bool = True) -> None:
         """Acquire the common core; roll back every acquired resource on failure."""
         if self._initializing or self.client is not None or self._close_task is not None:
             raise RuntimeError("Runtime can only be initialized once")
@@ -120,7 +121,8 @@ class Runtime:
                 client=self.client, registry=self.registry, protocol=self.provider.protocol,
                 work_dir=self.work_dir, permission_checker=self.checker,
                 context_window=self.provider.get_context_window(),
-                instructions_content=load_instructions(self.work_dir, user_home=self.user_home),
+                instructions_content=(load_instructions(self.work_dir, user_home=self.user_home)
+                                      if load_instruction_files else ""),
                 hook_engine=self.hook_engine,
             )
             # Preserve the historical root, but never reuse another runtime's

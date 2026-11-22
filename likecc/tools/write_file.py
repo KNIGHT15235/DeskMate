@@ -33,6 +33,10 @@ class WriteFile(Tool):
         self.file_history = file_history
         self._state_cache = file_state_cache
 
+    def _write_text(self, path, content):
+        """The target mutation boundary, after read/backup preconditions pass."""
+        path.write_text(content, encoding="utf-8")
+
 
     async def execute(self, params: Params) -> ToolResult:
         path = resolve_tool_path(params.file_path)
@@ -48,7 +52,7 @@ class WriteFile(Tool):
             file_history = get_tool_file_history(self.file_history)
             if file_history is not None:
                 file_history.track_edit(str(path))
-            path.write_text(params.content, encoding="utf-8")
+            self._write_text(path, params.content)
             if self._cache:
                 self._cache.invalidate(str(path.resolve()))
             if self._state_cache:

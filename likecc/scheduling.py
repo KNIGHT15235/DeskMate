@@ -229,6 +229,16 @@ class ScheduleStore:
             self.db.execute("""UPDATE executions SET status='interrupted', ended_at=?,
                 reason=reason || '；上次进程退出/中断。请查看会话、成果和磁盘后明确重试，系统不自动重放。'
                 WHERE status IN ('queued','awaiting_model','running','waiting')""", (stamp(self.clock()),))
+            # Older versions called every write error write_failed, even after
+            # truncating the file. Preserve their evidence and require review.
+            rows = self.db.execute("""SELECT id, evidence FROM executions
+                WHERE status IN ('completed','failed','cancelled') AND reviewed_at IS NULL""").fetchall()
+            for row in rows:
+                intents = json.loads(row["evidence"]).get("write_intents", {})
+                if any(i.get("status") in {"write_failed", "write_unverified"} for i in intents.values()):
+                    self.db.execute("""UPDATE executions SET status='interrupted',
+                        reason=reason || '；旧记录存在未核实的写入线索，请核对会话、成果和磁盘后明确重试。'
+                        WHERE id=?""", (row["id"],))
 
     def save(self, spec, *, task_id=None, revision=None):
         spec = spec.validated(self.workspace)
@@ -315,6 +325,14 @@ class ScheduleStore:
 
     def start(self, execution_id):
         with self.transaction():
+            # A later occurrence may already be queued when the running one
+            # becomes interrupted. Recheck at claim time, not only during scan.
+            self.db.execute("""UPDATE executions SET status='blocked_review',
+                reason='旧次执行结果未知，先查看旧次记录并明确重试；本次不自动调用模型。'
+                WHERE id=? AND status='queued' AND EXISTS (
+                    SELECT 1 FROM executions AS previous
+                    WHERE previous.task_id=executions.task_id
+                        AND previous.status='interrupted' AND previous.reviewed_at IS NULL)""", (execution_id,))
             changed = self.db.execute("""UPDATE executions SET status='running', started_at=?
                 WHERE id=? AND status='queued'""", (stamp(self.clock()), execution_id)).rowcount
         return changed == 1
