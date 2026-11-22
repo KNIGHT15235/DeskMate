@@ -28,3 +28,16 @@ audit/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local scheduler databases (schema and fixtures remain in source/tests)
+schedules.sqlite3
+schedules.sqlite3-wal
+schedules.sqlite3-shm
+schedules.sqlite3-journal
+scheduler-lock.sqlite3
+scheduler-lock.sqlite3-wal
+scheduler-lock.sqlite3-shm
+scheduler-lock.sqlite3-journal
+
+# Local execution logs
+*.log

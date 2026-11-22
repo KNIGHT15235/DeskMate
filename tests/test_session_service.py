@@ -45,6 +45,35 @@ def read_records(service):
 
 
 @pytest.mark.asyncio
+async def test_close_retries_failed_session_and_shares_concurrent_cleanup(factory, monkeypatch):
+    from likecc.service import _session_owners
+    runtime, service, _ = await factory()
+    session = service.session
+    original = session.close
+    attempts = []
+
+    def transient_close():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise OSError("temporary flush failure")
+        original()
+
+    monkeypatch.setattr(session, "close", transient_close)
+    try:
+        results = await asyncio.gather(service.aclose(), service.aclose(), return_exceptions=True)
+        assert all(isinstance(r, OSError) for r in results)
+        assert len(attempts) == 1 and not session._file.closed
+        assert _session_owners[(runtime.work_dir, session.session_id)] is service
+        await asyncio.gather(service.aclose(), service.aclose())
+        assert len(attempts) == 2 and session._file.closed
+        assert (runtime.work_dir, session.session_id) not in _session_owners
+    finally:
+        monkeypatch.setattr(session, "close", original)
+        original()
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["allow", "deny"])
 async def test_no_ui_execution_permission_persistence_and_repeated_resume(factory, decision):
     runtime, service, tool = await factory(turns())

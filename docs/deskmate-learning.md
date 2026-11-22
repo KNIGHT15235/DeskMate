@@ -497,3 +497,64 @@ Fake-IP 为代理保留域名到合成地址的映射。R4 收尾在 WSL 和 Win
 
 1. 在项目根目录及现有 `cc` 环境运行 `python -m examples.deskmate_materials --deny-write`。三项来源正常建立，`artifacts` 为空，临时目录没有 `outputs/study-plan.md`。再运行不带开关的命令，对照实际文件的尾部来源账目。
 2. 运行 `python -m pytest -q tests/test_materials_workflow.py::test_permission_fetch_cancels_and_reuses_without_expanding_or_replaying`。测试分别在权限等待和流式读取时取消，用同一会话再次读取，并检查两类 HTTP 资源关闭以及恢复历史不重新发请求。
+
+## R5：定义、执行与副作用证据
+
+本轮基线为 `0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a`。以下讲解对应实际源码，验证数量与失败过程单独记录在 [verification.md](verification.md)。
+
+### 任务定义为什么与单次执行分开
+
+阅读 `likecc/scheduling.py: TaskSpec`、`ScheduleStore.save()` 和 `scan()`。定义回答“每周五 18:00 想做什么”，其中内容、材料、输出、模型策略都能修改。`executions.snapshot` 是某个具体到期时间领取时的副本，包含当时的修订号和范围。用户把下一周输出改名，不应让上一周日志看起来像写过新文件。因此更新 tasks 不重写历史 snapshot；修改只取消尚未开始的旧队列。任务 ID 稳定，单次记录 ID、原定时间、session/run 和成果证据各有职责。
+
+`agents/task_manager.py` 管理当前进程内子 Agent；它的 asyncio.Task 不适合表达退出几天之后仍需存在的个人安排。R5 使用独立模块，没有改变团队 TaskCreate 的含义。
+
+### 数据库如何防止重复领取
+
+`ScheduleStore.scan()` 用 `BEGIN IMMEDIATE` 包住插入记录和推进 next_due，两步一起提交或一起回滚。`UNIQUE(task_id, due_at)` 是最终防线，即使重复扫描仍只有一条该时刻记录。随后 `start()` 只允许 `queued → running`，检查 UPDATE 的 rowcount；第二次调用不能再次领取已运行记录。UI 的确认 token 与定义 revision 还拒绝重复确认及陈旧编辑，但数据库约束并不依赖按钮是否禁用。
+
+工作区所有权另用 `scheduler-lock.sqlite3` 的长生命周期独占事务。第二实例不能取得锁，就不能进入 recover；不会因某个心跳过期把慢但活着的进程误判为死亡。进程硬退出由 OS 释放锁。这里只验证同一原生环境中的本地文件锁，不承诺网络盘或 Windows/WSL 同时持库。
+
+### 崩溃后为什么要核对副作用
+
+SQLite 提交与普通 Markdown 写入不是同一个事务。文件已经落盘、运行终态尚未提交时，重启只能知道“结果可能存在”，无法证明没写过。`recover()` 因而把活跃状态改为 interrupted，保留原定时间和全部线索，不把它放回自动执行队列。即使是已领取尚未执行的窗口，也采取同一保守规则。后续周期遇到未核对的中断记录变为 blocked_review。
+
+`retry()` 在用户查看结果并明确选择后创建新记录，旧记录保持中断状态并记下核对时间。retry_of 唯一约束拒绝双击重复重试。若新请求与既有到期时刻精确重合，用微秒区分新的人工请求；原定到期时刻不变。这是可审计的新尝试，不是分布式 exactly-once 承诺。取消也不撤销文件写入。
+
+### 如何把 R4 回读证据保存到 R5
+
+R4 的 `MaterialWrite.execute()` 追加来源账目并计算预期文本摘要；`MaterialRead.execute()` 重新读取文件，与本次写入摘要比较。R5 在 `MaterialsWorkflow.checkpoint()` 注入控制器的 `_save_evidence()`，写入前保存 write_intents，写入成功及回读后立即提交 sources、artifacts、digests。写入意图与实际成果必须分开：一次因未读旧文件而拒绝的尝试不应让旧文件变成“本次成果”。本轮相关回归确实捕捉过这一误分类，已修复。
+
+`DesktopController._event()` 另外保存工具拒绝/失败和待确认状态；`_finish_scheduled()` 保存最终运行状态。即使 Agent 返回 completed，也可能只有文字，或写入被拒绝；页面不会据此捏造文件成功。数据库终态提交失败时停止后续调度并显示错误，已提交的回读证据仍留在库内，重启按中断核对。
+
+Windows 专项还捕捉过就绪状态先于恢复历史发布的时序问题。`_open()` 现在把 idle、任务和执行历史一起写入同一个加锁快照，避免 Qt 看到“就绪但列表为空”的中间状态。
+
+### 五个面试问答
+
+1. **为什么不是用 asyncio.sleep 一周？** sleep 不持久，进程退出就丢失。定义保存本地时间/时区及下次 UTC 到期，扫描时由持久库判断到期。测试注入可控时钟，不等待真实分钟。
+2. **唯一索引足以保证文件只写一次吗？** 它防止同一个到期记录重复领取，但不能把模型 API、文件系统和 SQLite 合成原子事务。未知结果要标中断、核对、显式新尝试。
+3. **为什么调度时间确认不等于写文件授权？** 时间是安排，模型调用、网页访问、文件写入是不同范围。模型策略单独确认；ExecutionScope 是硬上界，其后仍走 PermissionChecker/Interaction。模型输出没有扩大范围的接口。
+4. **如何让后台任务不污染聊天？** `_start_scheduled()` 创建独立 Runtime/SessionService，保留前台服务和展示快照。控制器与一个 RunHandle 消费者保持互斥，结束后恢复前台；Qt 不持有这些后台对象。
+5. **如何证明恢复没有重放？** 实验在写入后直接 os._exit，重新使用同一库，比较实际工具次数、文件 bytes/mtime 和模型调用次数；仅检查状态文字还不够。恢复会话同样不启动 Agent。
+
+### 两个可运行实验
+
+在仓库根目录、现有 WSL cc 或 Windows deskmate-win 环境运行，均无真实模型或网页请求：
+
+```bash
+python -m examples.deskmate_schedules missed-reminder
+python -m examples.deskmate_schedules interrupted --stage written
+```
+
+第一项保存提醒后关闭库，推进一天再重开，重复扫描只有一条逾期待处理；完成后为 done，模型调用为 0。第二项用子进程执行真实文件工具，在写入成功、终态落盘前硬退出；重开显示 interrupted，WriteFile 计数为 1，文件内容与修改时间不变，恢复会话时模型调用为 0。命令打印临时目录，保留数据库和文件可亲手检查。加 `--stage claimed` 对照已领取但尚未执行的情形，写入数应为 0。
+
+### 人工验收中补充的证据边界
+
+UI1 中用户实际看到主窗口标题栏在屏幕外、无法拖动。`DesktopApplication._fit_window()` 在首次显示和托盘恢复后依据 Qt availableGeometry 恢复可达性；自动化注入越界可证明恢复措施有效，但没有证明最初偏移的具体成因。用户正常重启后确认完整可见和可拖动，再加原数据库/文件未变，才构成本次 Windows 显示修正的人工证据。其他显示器组合仍未人工覆盖。
+
+同样，D1 的只读 SQLite 审计能证明历史 ID、状态和重复约束结果，却不能证明用户亲眼看到哪个窗口。C2 的 done 也不能单凭数据库推断“系统自动完成”：用户明确说明曾手动点击完成。测试报告、磁盘事实和用户可见反馈应分别保存，再核对它们是否一致。
+
+真实 R5-R3 案例中，`MaterialWrite.execute()` 只成功写入一次，随后 `MaterialRead.execute()` 保存 verified，`DesktopController._save_evidence()` 将摘要写进当次 executions。Windows 磁盘字节含 CRLF，R4 的 digest() 比较规范化后的文本：字节哈希用于确认重启前后磁盘未变，文本哈希用于确认回读与本次写入一致，二者不能混为同一种校验。此次两种校验都分别通过。
+
+`ScheduleStore.cancel()` 停止未来周期，已完成执行仍为 completed/verified。重开后 `SessionService.new_session()` 会增加一个空会话；这不等于重放任务。实际对照同时检查三个旧 RUN_STATE 的 run_id 未变、新会话没有 RUN_STATE、八个原文件的哈希/大小/mtime 不变，才支持“正常重启未重复执行”的结论。
+
+界面中的“取消运行”与 WriteFile 卡片的“拒绝”代表不同结果。本次用户在写入权限等待时取消，持久记录正确为 cancelled；尽管目标文件没有生成，也不能据此把拒绝写入验收记为通过。该真实案例最后由用户选择跳过，自动化拒绝用例与真实取消案例分别保留各自结论。

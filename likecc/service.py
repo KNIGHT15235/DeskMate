@@ -378,7 +378,10 @@ class SessionService:
         task.add_done_callback(finished)
 
     async def aclose(self, *, extract_memories: bool = False):
-        if self._close_task is None:
+        # Keep a failed task until the next call, so concurrent waiters share
+        # its result. A later close retries resources that did not close.
+        if (self._close_task is None or self._close_task.done() and
+                (self._close_task.cancelled() or self._close_task.exception() is not None)):
             self._close_task = asyncio.create_task(self._close(extract_memories))
         await finish_cleanup(self._close_task)
 

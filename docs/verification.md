@@ -1,6 +1,6 @@
 # 验证说明
 
-本页按阶段保留 LikeCC 0.2.0 和 DeskMate 各轮实际结果。各阶段的“待确认”代表当时状态，最新结果见文末 R4 验证。
+本页按阶段保留 LikeCC 0.2.0 和 DeskMate 各轮实际结果。各阶段的“待确认”代表当时状态，最新结论见文末 [DeskMate R5 人工验收报告](#deskmate-r5-人工验收报告2026-11-22)。
 
 以下为 LikeCC 0.2.0 在 2026-09-22 完成的发布验证。测试使用本地 fake 模型、临时文件和临时 Git 仓库；不需要模型 API Key。
 
@@ -1036,3 +1036,477 @@ QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 \
 实际执行了 28 个候选文件的敏感信息及文件类型检查、19 个 Python 文件的 AST 解析、`git diff --check` 和忽略规则检查。WSL `cc` 再次运行本机只读验收审计，确认运行终态、单次写入、回读以及恢复快照中 7 个文件的哈希、大小、修改时间一致，退出 0。本次未重新执行 pytest 或 SubAgent，完整回归沿用上文明确标注的开发阶段结果。真实 HTTP 流内取消与实网重定向仍保留为覆盖限制。
 
 首次暂存检查发现两份新增文档头部的 Markdown 行末双空格被报告为尾随空白，已改用等效的反斜杠换行，原文字内容保留。提交前重新核对暂存路径、统计与差异格式。
+
+## R5 开发与离线验收（2026-11-20）
+
+工作区 `D:\ldj\03\DeskMate`（WSL `/mnt/d/ldj/03/DeskMate`），分支 `feat/deskmate`，起始 HEAD `0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a`，初始状态干净，无适用 AGENTS.md。Windows 沙箱用户与仓库 owner 不同，Git 检查使用单命令 `-c safe.directory=D:/ldj/03/DeskMate`，没有更改全局 Git 设置。沙箱内 WSL 首次返回 E_ACCESSDENIED，随后通过允许的提升调用使用既有 cc；不更换解释器、依赖或权限策略。
+
+### 分检查点与实际调试过程
+
+| 阶段 | 实际结果 |
+| --- | --- |
+| R5-0 新用例修复前 | WSL 6 failed / 4.18s，涵盖关闭重试、URL allow/deny、来源复制、两种空网页 |
+| R5-0 修复后相关回归 | WSL 119 passed / 8.42s；Windows 118 passed、1 skipped / 15.72s |
+| R5-A 存储首轮 | WSL 8 passed / 2.62s：定义/历史、唯一领取、活实例、隔离、周期合并、重启 |
+| R5-B 初次兼容检查 | WSL 57 passed、1 failed / 22.51s：写入前意图误登记为实际成果，导致旧文件读取被当成回读失败；已分离 write_intents 与 artifacts |
+| R5-B 修正后的控制器与资料用例 | WSL 32 passed / 6.59s：队列、模型确认、R4 卡片、拒绝、真实文件回读、文本-only、越界拒绝、原聊天保留 |
+| R5-C 首次 Qt/实验检查 | 4 passed、1 failed / 14.70s：实验恢复 Runtime 缺少 permission_mode 参数；已修复实验装配，未放宽断言 |
+| 首轮扩大专项 | WSL 188 passed / 50.05s；Windows 183 passed、4 failed、1 skipped / 92.97s |
+| Windows 时序修复 | 四项失败暴露 idle 先于恢复历史发布，以及空任务窗口未初始化详情。改为原子发布就绪/历史，初始化详情；相关 9 passed / 16.98s |
+| Windows 存储/硬退出/来源补测 | 17 passed / 15.80s |
+| 收尾边界 | WSL 23 passed / 13.40s：含启动期间取消、终态落盘失败后停止领取、未知副作用阻塞后续周期 |
+| 时间解析补充 | WSL 15 passed / 3.74s；中文分钟/半点不丢失，近似或多个时刻请求补充 |
+
+此前完整回归曾为 WSL 882 passed / 71.15s；在此后补充分钟解析用例，最终完整结果以下节为准。所有 R5 自动化均使用离线 LLMClient、可控时钟、临时工作区和真实 SQLite；未发送真实模型/网页请求。Qt 用例使用 offscreen，不能称为可见桌面或真实托盘人工通过。
+
+三条完整流程分别位于 `test_schedule_window.py`、`test_desktop_scheduling.py` 和 `test_schedule_experiments.py`。中断实验确实启动独立 Python 子进程并 os._exit(71)，不是仅改状态字段：已领取情形工具写入数 0，写入后情形为 1；同一数据库重开、重复扫描和恢复会话后计数及文件 bytes/mtime 均不变。另有故障注入验证“文件已回读但终态落盘失败”的证据保留。
+
+本轮未执行可见桌面人工清单或真实计费模型验收。真实调用建议范围、三条人工步骤、存储与恢复限制见 [R5 说明](deskmate-schedules.md)。R4 已有真实网页验收继续有效；真实 HTTP 流中途取消与实网重定向两项覆盖限制保持原记录。
+
+### 最终完整离线结果与命令
+
+| 环境/检查 | 实际结果 |
+| --- | --- |
+| WSL Ubuntu-24.04 / cc | Python 3.11.16，SQLite 3.53.4，PySide6 6.8.3；最终 **888 passed，0 failed，0 skipped，59.68s** |
+| Windows / deskmate-win | Python 3.12.7，SQLite 3.54.1，PySide6 6.8.3；最终 **882 passed，0 failed，6 skipped，138.66s** |
+| `tests/verify_subagent.py` | 两环境分别 **90/90**；脚本的 `Background task … failed: boom` 是故障注入预期输出，退出码均 0 |
+| 两个入口 `--help` | 两环境的 `python -m likecc --help`、`python -m likecc.desktop --help` 均退出 0 |
+| 学习实验 CLI | WSL 实际运行 missed-reminder、interrupted --stage written，均退出 0；分别为 0 次模型调用与 1 次工具写入，重开无重放 |
+| 静态/版本检查 | 16 个改动 Python 文件 AST 解析通过，24 个改动/新增文件；`git diff --check` 通过；暂存区为空，分支/HEAD 与开工一致 |
+
+Windows 6 项跳过均为原有平台边界：`test_bash_process_group.py` 四项 POSIX 进程组契约，`test_execution_contract.py:229` 一项 WSL/POSIX 进程组契约，`test_permissions.py:136` 一项找不到适合的系统文件链接测试。本轮没有新增平台跳过或弱化这些断言。时间解析补充前 Windows 完整结果另为 876 passed、6 skipped / 148.56s，不与最终结果混用。
+
+WSL 实际使用解释器 `/home/ldj/anaconda3/envs/cc/bin/python`，可在现有 cc 终端复现：
+
+```bash
+cd /mnt/d/ldj/03/DeskMate
+QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 \
+  /home/ldj/anaconda3/envs/cc/bin/python -m pytest -q -ra -p no:cacheprovider \
+  --junitxml=.r1-verification/r5-final-wsl.xml
+PYTHONDONTWRITEBYTECODE=1 /home/ldj/anaconda3/envs/cc/bin/python tests/verify_subagent.py
+/home/ldj/anaconda3/envs/cc/bin/python -m likecc --help
+/home/ldj/anaconda3/envs/cc/bin/python -m likecc.desktop --help
+/home/ldj/anaconda3/envs/cc/bin/python -m examples.deskmate_schedules missed-reminder
+/home/ldj/anaconda3/envs/cc/bin/python -m examples.deskmate_schedules interrupted --stage written
+```
+
+两个 CLI 实验本次分别保留在 `/tmp/deskmate-r5-4r63s736`、`/tmp/deskmate-r5-cmdc7gd2`。这些是 WSL 临时实验目录，不是用户正式工作区。claimed 阶段在两环境完整 pytest 中均实际启动子进程覆盖。
+
+Windows 实际命令如下。重跑应换一个全新的 basetemp 名称，避免共享临时目录权限或已有内容被 pytest 清理；本轮未清理历史验证目录。
+
+```powershell
+Set-Location 'D:\ldj\03\DeskMate'
+$env:QT_QPA_PLATFORM='offscreen'
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONUTF8='1'
+& D:/anaconda3/Scripts/conda.exe run --no-capture-output -n deskmate-win python -s -X utf8 -m pytest -q -ra -p no:cacheprovider --basetemp=.r1-verification/r5-final-win-05 --junitxml=.r1-verification/r5-final-win.xml
+& D:/anaconda3/Scripts/conda.exe run --no-capture-output -n deskmate-win python -s -X utf8 tests/verify_subagent.py
+& D:/anaconda3/Scripts/conda.exe run --no-capture-output -n deskmate-win python -s -X utf8 -m likecc --help
+& D:/anaconda3/Scripts/conda.exe run --no-capture-output -n deskmate-win python -s -X utf8 -m likecc.desktop --help
+```
+
+阶段性专项使用同一 `pytest -q -p no:cacheprovider`，文件集合为 `test_scheduling`、`test_desktop_scheduling`、`test_schedule_window`、`test_schedule_experiments`、`test_r5_material_regressions`、`test_session_service`、`test_materials_workflow`、原有五个桌面测试及 `test_permissions`。阶段性 XML 与最终 XML 保留在忽略的 `.r1-verification/` 下。没有新增生产依赖、修改 uv.lock、暂存、提交或推送。
+
+### R5 集中人工验收前的本次核查
+
+本轮按用户要求一次性提供全部操作与预期，等待集中反馈。分支仍为 feat/deskmate，HEAD 仍为 R4 基线，已有 24 个 R5 改动/新增文件保留，暂存区为空。没有修改生产代码或测试代码，没有新功能开发。
+
+历史证据只读核对：r5-final-wsl.xml 为 888 tests、0 failures、0 errors、0 skipped；r5-final-win.xml 为 888 tests、0 failures、0 errors、6 skipped，等于 882 passed。时间戳分别为 2026-11-20T20:55:07+08:00、20:56:26+08:00。本轮未重跑完整套件或 SubAgent，SubAgent 90/90 与入口帮助结果沿用先前记录。
+
+实际环境复核：Windows deskmate-win 的 python.exe 为 `C:\Users\28436\.conda\envs\deskmate-win\python.exe`，Python 3.12.7、SQLite 3.54.1、PySide6 6.8.3，源码来自 DeskMate。一次多行 python -c 被 Conda 包装器拒绝，改用单行/外部脚本完成检查；不是产品失败。沙箱 CIM 进程清单无权限，未据此声称用户当前桌面进程不存在。
+
+新建独立根目录 `C:\Users\28436\AppData\Local\Temp\deskmate-r5-acceptance-0f5098c3`，workspace 内为指定样例与无真实凭据占位配置。预检实际取得 windows Qt 平台、托盘可用 True、后端 idle、0 tasks / 0 executions，关闭后 worker_closed=True，退出码 0；没有显示窗口或提交任务，不算人工验收。
+
+本次重新执行的只是现有四个专项文件 `test_scheduling.py test_desktop_scheduling.py test_schedule_window.py test_schedule_experiments.py`：**29 passed，24.18s，退出 0**。命令使用 deskmate-win、python -s -X utf8、QT_QPA_PLATFORM=offscreen、PYTHONDONTWRITEBYTECODE=1、-p no:cacheprovider，basetemp 在上述根目录的 regression-01，XML 为 current-offline.xml。覆盖真实存储、可控时钟、离线 LLMClient、Qt 控件和独立崩溃子进程；不等同于真实桌面操作或真实 Provider 验收。
+
+本轮用户可见操作仍全部待反馈；真实 Provider 未授权、未执行。预期与编号详见 [集中清单](deskmate-schedules.md#r5-人工验收准备集中操作统一反馈2026-11-20)。没有暂存、提交、推送或启动 R6，原 likecc 目录未改动。
+
+### R5 直接桌面操作尝试与阻塞（2026-11-20）
+
+用户授权直接操作电脑后，使用电脑操作工具读取实际 Windows DeskMate 控件。工作区为上述隔离 workspace，模型显示 r5-reminder-only / offline-no-model，就绪，0 项安排。填入提醒测试草稿成功，但未能发送；没有创建任务或执行记录。
+
+截图失败信息为 `FrameArrived timed out: timed out waiting on channel` / `window capture timed out: timed out waiting on channel`，点击失败为 `coordinate input geometry is unavailable`。文本控件树可读取；激活窗口、Raise 和 Tab 导航未观察到焦点变化。用户确认桌面已解锁、DeskMate 已在前台后，重新选择窗口仍截图超时，Tab 仍未改变焦点，因此停止进一步输入，保留未发送的测试草稿。仅凭这些信息无法定位底层原因，记录为电脑控制通道阻塞，不归类为 DeskMate 产品失败。
+
+只读审计实际结果：tasks=[]、executions=[]、duplicate_due_groups=[]；project_notes.md 为 220 bytes，SHA256 为 `5c708cbd1324f2504ec5b0952d7b0f16e4bf066213c8cb5e92df91b2cd5f435a`，修改时间未变；outputs/weekly-summary.md 不存在。本次重新核对三个 XML 的计数和时间戳，未重跑测试：完整 WSL 888 passed、Windows 882 passed / 6 skipped；验收准备专项 29 passed / 24.183s。
+
+分支仍为 feat/deskmate，HEAD 为 0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a，24 项已有改动/新增文件保留。此次无产品修复、无真实模型调用、无强制退出或手工崩溃。A/B/C 可见验收仍待完成，不能新增“人工通过”或“已具备提交条件”的结论。限制仍为一次性/每周、Asia/Shanghai/UTC、本地单调度器；不支持 Windows/WSL 同写任务库，未知写入不承诺无损恢复或自动重放。
+
+### R5 逐项人工验收进展（2026-11-22）
+
+用户改为每轮一项、反馈后继续。沿用仓库外隔离 workspace 与 r5-reminder-only 占位 Provider，不使用真实模型。下列编号对应本次逐项清单，与 11 月 20 日集中清单的编号分别记录。
+
+| 项目 | 实际结果与证据 |
+| --- | --- |
+| P1 启动独立工作区 | 用户回复“正确”：主窗口就绪，工作区、占位模型及 0 项安排/待处理符合预期 |
+| P2 打开任务管理 | 用户回复“正确”：任务窗口、空列表、表单和后台调度说明符合预期 |
+| A1 自然语言提醒预览 | 用户提供截图：2026-11-23T19:00:00、Asia/Shanghai、仅一次、正确隔离工作区，材料/网页/输出均无，模型不调用；安排及执行列表仍为空，未确认保存 |
+| A2 歧义时间 | 用户回复“正确”：发送“明天七点提醒我复习这份计划”后提示补充上午/下午，不新增安排，输入保留 |
+| A3 保存临近提醒 | 用户回复“正确”：表单预览并确认 R5-A3 隐藏到期提醒，未到期时一项安排、无执行记录 |
+| A4 隐藏后到期 | 用户回复“正确”：关闭任务窗口及主窗口后保留托盘，真实到期后恢复，只有一条待处理，完成按钮可用，无模型或写入卡片 |
+| A5 重复扫描 | 用户回复“正确”：保持运行等待 20 秒并三次关闭/打开任务窗口，仍只有原定时刻的一条待处理 |
+| A6 完成提醒 | 用户回复“正确”：点击完成后显示“已完成提醒”，按钮禁用，主窗口一项安排、零项待处理，历史仍一条 |
+| A7 正常退出重开 | 用户回复“正确”：原提醒和唯一已完成历史保留；附图主窗口为一项安排、零项待处理。重开后只读审计确认任务/执行 ID、due_at、done 状态与重启前一致，无重复记录 |
+| A8 修改提醒 | 修改保存用户回复“正确”，持久定义 revision=2；用户在 18:07 提供截图，新时间 18:04:18 的记录为待处理。旧时间点的空列表未现场查看；事后只读历史确认旧时间 18:02:18 无记录，新时间仅一条 |
+| A9 取消提醒 | 创建后立即取消，用户回复“正确”；到期前审计定义 enabled=0、next_due 为空，本任务无执行记录。超过原定时间后用户再次确认，18:18:09 附近只读复核仍无本任务执行记录 |
+| B1 周期资料预览 | 用户回复“正确”：解析为 2026-11-27 18:00:00、Asia/Shanghai、每周五、执行资料任务，预览阶段未保存 |
+| B2 范围核对及保存 | 用户回复“正确”：材料 project_notes.md，URL 无，输出 outputs/weekly-summary.md，模型每次确认；保存后四项安排、零项待处理，新任务无到期记录 |
+| B3 修改周期任务 | 用户回复“正确”；只读审计确认原 task_id 保持、revision=2，首次改为 2026-11-22 18:26:52、每周日，材料/输出和 ask 策略未扩大 |
+| B4 到期待确认 | 用户回复“正确”：唯一记录为待确认模型调用，四项安排/一项待处理，会话和运行为空，无成果；未点击允许模型 |
+| B5 取消周期任务 | 用户回复“正确”：定义和当次记录显示已取消，允许模型按钮禁用，四项安排/零项待处理；只读核实历史保留且未执行 |
+| C1 未到期重启 | 创建及正常退出重开两轮均获用户“正确”反馈；重启前后同一 task_id、18:50:05 到期时间及空执行历史保持，五项安排/零项待处理 |
+| C2 退出期间错过提醒 | 用户确认到期前退出、过期后重开出现逾期待处理，并明确确认随后手动完成；等待与三次重复查看后仍唯一。只读核实原定 18:47:00 的同一记录为 done，无重复 |
+| C7 第二可见实例 | 用户回复“正确”：同一 Windows 工作区第二实例提示已有活动调度器，原实例仍就绪且六项安排/零项待处理；只读核实任务与执行记录未变化。随后用户确认只退出报错第二窗口，原实例继续运行 |
+| D1 最终持久数据核查 | 只读审计为六项安排、四条执行（三条 done、一条 cancelled），没有重复到期组；输入哈希/大小/mtime 未变，输出不存在。此项为数据核查，不新增人工操作结论 |
+
+A1 的内容保留完整原句“明天晚上七点提醒我复习这份计划”，与 parse_schedule() 将原文保存到 TaskSpec.content 的实现一致。此前指导将内容简写为“复习这份计划”不够准确，已说明；不是此次发现的产品缺陷。右侧任务内容编辑框为空、下方聊天解析预览完整，符合现有表单行为。截图仅证明预览，未证明持久保存、到期、隐藏或重启流程通过。
+
+上述 P1 至 A7 人工步骤未重跑 pytest 或 SubAgent，未修改生产代码或调用真实 Provider。随后 UI1 的修正与新回归结果单独记录如下，其余逐项验收继续等待操作和反馈。
+
+A4 反馈后的只读数据库审计：task_id=d6287841294348deb88928a3fd8e4210，revision=1，内容为 R5-A3 隐藏到期提醒，本地时间 2026-11-22T17:35:02、Asia/Shanghai、once。唯一执行 id=526e7a807e114fc091e99c2a853f3cdf，due_at=2026-11-22T09:35:02+00:00，status=pending，原因为“逾期待处理。”，session_id/run_id 为空，evidence={}，duplicate_due_groups=[]。输入文件哈希/大小/修改时间保持原样，输出不存在。该审计支持持久记录与用户反馈一致；窗口隐藏过程的证据来自用户确认，重复查看、完成和重启仍待后续逐项验收。
+
+A6 反馈后、重启前再次只读审计：上述 task_id、execution_id、due_at 和定义均未变化，唯一执行 status=done，duplicate_due_groups=[]。输入文件哈希/大小/修改时间仍不变，输出不存在，session_id/run_id 仍为空。该结果作为 A7 正常退出重开的对照；此时尚未确认重启验收通过。
+
+A7 重开后审计的输入文件哈希、大小、修改时间也与重启前一致，输出仍不存在。持久化案例通过，但用户同时报告主窗口只显示一部分且无法鼠标拖动；截图中左侧及标题栏在屏幕可见范围外，右侧和底部仍可见。记为 UI1 窗口可达性问题，待定位，不因 A7 数据正确而忽略。源码初查 ChatWindow.__init__() 只设置 resize(920, 780)，DesktopApplication.show_window() 调用 showNormal()/raise_()/activateWindow()，未发现按屏幕可用区域校正位置的逻辑；尚不能据此确定该次偏移的根因。先指导用户通过 Windows 系统菜单最大化恢复可见性，再观察结果；未修改生产代码，未宣称修复，也未重新运行测试。
+
+### UI1 窗口可达性最小修正与可见复验（2026-11-22）
+
+用户反馈 Alt+空格没有弹出菜单，窗口仍显示不全。A8 暂停，保留原始偏移原因尚未确定的结论。隔离 Qt 回归将主窗口设为 (-300, -180) 且超过屏幕大小，在启动与托盘恢复两条路径均复现窗口继续越界，验证了缺少恢复措施的问题；该故障注入不等于复现用户桌面最初产生偏移的原因。
+
+最小生产改动仅在 DesktopApplication：首次显示及 show_window() 后，通过带 QObject 上下文的零延时 Qt 回调执行 _fit_window()，在原生边框形成后核对各屏幕 availableGeometry。已完整位于任一屏幕内的位置保持；越界窗口选主要重叠的屏幕，必要时缩小并移动回可用区域。全部计算沿用 Qt 逻辑像素，合法负坐标副屏不会被当成越界；最大化/全屏状态跳过。若布局最小尺寸超过可用区域，仅保证标题栏回到可见范围，不承诺所有小屏幕布局都能完整容纳。没有修改调度器、数据库、会话或权限行为。
+
+测试在 tests/test_desktop_lifecycle.py 增加启动/恢复越界两项，以及模拟负坐标副屏一项；同时检查草稿、会话、空任务记录保持。首次 Windows 运行 3 failed / 17.67s：两项为旧代码未纠正窗口，第三项是测试对 Qt offscreen 显示时两像素边框位移的断言过严。副屏断言改为仍完整位于原副屏、尺寸不变、只容许极小边框位移；未放宽越界窗口必须完整进入可用区域的断言。生产修正后定向 3 passed / 14.81s。
+
+| 本次实际回归 | 结果 |
+| --- | --- |
+| Windows deskmate-win，五个相关文件 | 38 passed，66.07s，退出 0 |
+| WSL Ubuntu-24.04 / cc，同五个文件 | 38 passed，35.64s，退出 0 |
+| 隔离工作区只读审计 | 原 task/execution ID、due_at 和 done 状态不变；duplicate_due_groups=[]，输入哈希/大小/mtime 不变，输出仍不存在 |
+| Git 检查 | diff --check 通过，暂存区为空，无提交或推送 |
+
+五个文件为 test_desktop_lifecycle.py、test_desktop_launch.py、test_desktop_window.py、test_schedule_window.py、test_desktop_scheduling.py。共同参数为 `-m pytest -q -p no:cacheprovider`、QT_QPA_PLATFORM=offscreen、PYTHONDONTWRITEBYTECODE=1；Windows 使用 `conda run --no-capture-output -n deskmate-win python -s -X utf8`，WSL 使用既有 `/home/ldj/anaconda3/envs/cc/bin/python`。Windows basetemp 在 `C:\Users\28436\AppData\Local\Temp\deskmate-r5-ui1-related-20261122-a`，XML 为同路径加 `.xml`；WSL basetemp 在 `/tmp/deskmate-r5-ui1-related-20261122-a`，XML 同样加 `.xml`。两平台测试库互相独立，不写正在运行的验收任务库。修复前、定向修复后 XML 分别为 Windows Temp 下 deskmate-r5-ui1-before-20261122-a.xml、deskmate-r5-ui1-after-20261122-a.xml。
+
+上述是离线自动化证据，用户当前旧进程尚未加载修正，需要正常退出重开进行 UI1 可见复验；未将其记为人工修复通过。本轮未重跑完整套件、SubAgent 或帮助入口，先前 888/882 等仍是 UI1 修正之前的历史记录。未调用真实 Provider，未改动原 likecc 目录。
+
+随后用户执行正常退出重开，并回复“正确”：新主窗口完整显示、标题栏可见且能拖动，仍一项安排、零项待处理，原已完成记录保留。因此 UI1 的本次 Windows 重启显示/拖动复验通过，恢复 A8 逐项验收。再次只读审计确认 task_id=d6287841294348deb88928a3fd8e4210、execution_id=526e7a807e114fc091e99c2a853f3cdf、due_at 和 done 状态不变，无重复到期组，输入文件未变、输出不存在。该人工结论不扩大到其他显示器组合、分辨率或原始偏移诱因；修正后的托盘恢复定位目前仍以自动化回归为证据。
+
+### A8 修改时间后的实际记录（2026-11-22）
+
+按逐项操作生成相差两分钟的旧/新时间，用户保存 R5-A8 修改前后，再选中原安排修改为 R5-A8 修改后并确认。用户回复“正确”后，17:59:45 附近只读核实 task_id=37385d958f104b94a8ddfe9a5888c1a9，revision=2，local_at=2026-11-22T18:04:18、Asia/Shanghai，next_due=10:04:18+00:00；本任务尚无执行记录，总共两项定义，未新增第三项。
+
+原计划在旧时间 18:02:18 后、新时间之前查看空列表，用户实际于 18:07 检查并提供截图：新内容和新时间正确，状态待处理、会话/运行为空、没有已写入成果。此时已过新时间，出现待处理符合预期。随后的真实工作区只读审计确认本任务唯一执行 id=659e8df6e8a2446599a8a8b286c3bf10，due_at=2026-11-22T10:04:18+00:00，status=pending，旧时间无执行记录，duplicate_due_groups=[]。输入文件未变，输出不存在；原 A3 执行仍为 done。
+
+因此新时间到期有用户可见截图证据，旧时间未生成记录由实际持久历史核实；不能声称用户在旧时间点亲眼观察过空列表，也不将截图查看时间当成后台准确领取时间。本轮未修改代码或重跑测试，接下来先完成 A8 待处理提醒再进入 A9。
+
+A8 收尾用户回复“正确”，随后只读审计确认原执行 659e8df6e8a2446599a8a8b286c3bf10 已为 done，未新增执行记录。
+
+### A9 到期前取消（2026-11-22）
+
+用户按表单创建 R5-A9 取消提醒并立即取消，回复“正确”。18:12:14 附近只读核实 task_id=401826b2f1c54d839d2b002ee0fcf467、revision=2、enabled=0、next_due=null，原定本地时间为 2026-11-22T18:16:14、Asia/Shanghai；本任务无执行记录。全库三项安排、两条 done 执行，duplicate_due_groups=[]，输入文件未变、输出不存在。此时尚未到原定时间，取消后不触发的到期后检查留待下一轮用户反馈与审计。
+
+到期后用户回复“正确”；18:18:09 附近再审计，原定 18:16:14 已过去，本任务仍 enabled=0、无执行记录，全库仍是三项安排和原来的两条 done，无重复到期组，输入/输出状态未变。A9 的真实时间到期后不触发检查通过。接下来进入 B1 周期资料任务预览，真实 Provider 仍未授权、未调用。
+
+### B1/B2 周期定义与确认范围（2026-11-22）
+
+用户发送“每周五下午六点，根据工作区的 `project_notes.md` 更新 `outputs/weekly-summary.md`”，确认预览时间/时区后，逐项核对文件、URL、输出及模型策略并保存，两轮分别回复“正确”。18:22:34 附近只读审计确认新 task_id=32634e55e8604010b8cf73f5fea4377d、revision=1、kind=execute、repeat=weekly、local_at=2026-11-27T18:00:00、timezone=Asia/Shanghai、next_due=2026-11-27T10:00:00+00:00。files=[project_notes.md]、urls=[]、outputs=[outputs/weekly-summary.md]、model_policy=ask，Provider 为既有 r5-reminder-only / offline-no-model 占位配置。
+
+全库四项安排，仍仅有前两项提醒的 done 记录，新任务没有执行记录；duplicate_due_groups=[]，输入文件未变，输出不存在。此阶段只确认真实桌面的周期定义、预览、保存与查询，不是模型资料执行通过。下一项为修改首次时间，以今天到期验证待模型确认；若改为周日首次日期，重复星期相应变为周日，不能继续称其为每周五。
+
+B3 用户修改原周期任务并回复“正确”。18:27:41 附近只读核实仍为 task_id=32634e55e8604010b8cf73f5fea4377d、revision=2，内容更新为 R5-B3 周期资料任务，local_at=2026-11-22T18:26:52、Asia/Shanghai、weekly，星期为周日；输入/URL/输出列表与 model_policy=ask 保持。此时新时间已过，存在唯一执行 id=5220d89f33004a9cbfce7b271733bb1f，due_at=2026-11-22T10:26:52+00:00，status=awaiting_model，session_id/run_id 为空、evidence={}，下一时刻为 2026-11-29T10:26:52+00:00。没有重复组，输入未变、输出不存在。这里只记录真实库已到期待模型确认；B4 可见状态仍待用户查看，不自动批准模型调用。
+
+B4/B5 随后分别获用户“正确”反馈。取消后只读审计确认原周期 task_id 不变、revision=3、enabled=0、next_due=null；原执行 5220d89f33004a9cbfce7b271733bb1f 保留，状态 cancelled、原因“用户取消安排”，session_id/run_id 仍为空、evidence={}。全库四项安排、两条 done 与一条 cancelled，无重复到期组，输入文件未变，输出不存在。周期定义、修改、到期待确认和取消的可见流程已通过；没有批准占位 Provider 或真实 Provider 执行。
+
+### B6–B9 离线证据复核
+
+本轮只读核对 UI1 回归的 Windows XML（38 tests、0 failures/errors/skipped）与相关源码断言，没有再次运行测试。以下项目已包含在上文 Windows/WSL 各 38 passed 中；属于离线模型、临时工作区、真实 SQLite/文件和 offscreen Qt 的自动化证据，不标为用户可见执行或真实 Provider 通过。
+
+| 清单项目 | 已有测试及核对内容 |
+| --- | --- |
+| B6 前台忙时排队 | test_weekly_queues_then_permissions_evidence_and_preserved_chat：前台运行时为 queued 且说明等待当前运行，之后独立定时会话执行并恢复前台内容 |
+| B7 拒绝写入 | 上述 deny=True 参数：WriteFile 卡片被拒绝，磁盘无输出，artifacts 空、tool_errors 保留用户拒绝；Agent completed 不被当作写入成功 |
+| B8 批准写入/回读/历史 | deny=False：输出含来源标识，artifacts=verified、digest 和 session/run 保存，重开保留证据且不增加模型调用 |
+| B9 R4 卡片与草稿 | test_scheduled_r4_question_permission_cards_preserve_draft：实际 Qt 问答/权限控件可提交，原草稿保持，记录显示已回读核对 |
+
+XML 同时包含 test_model_confirmation_and_truthful_outcomes 的 text_only、readback_fail、expand 三个参数，分别核对无写入、回读失败和超范围拒绝的真实结果。当前普通桌面入口的占位 Provider 不能执行这些资料任务；真实可见执行仍须单独授权。接下来继续 C1 未到期重启检查。
+
+### C1 未到期重启的前置对照（2026-11-22）
+
+用户创建 R5-C1 未到期重启提醒并回复“正确”。18:35:50 附近只读审计确认 task_id=db19fe56663145e4ac1f30e8c23cd343、revision=1、enabled=1，local_at=2026-11-22T18:50:05、Asia/Shanghai、once，next_due=2026-11-22T10:50:05+00:00，本任务无执行记录。全库五项安排，仍为既有两条 done 与一条 cancelled，duplicate_due_groups=[]，输入未变、输出不存在。保存为重启前对照，下一轮要求在到期前正常退出并重开同一工作区；此时不宣称重启检查通过。
+
+用户按原工作区命令正常退出重开后回复“正确”。18:37:46 附近只读复核上述任务 ID、revision=1、enabled=1、next_due、内容和范围均与重启前相同，仍未到 18:50:05，未生成该任务执行记录。原两条 done 与一条 cancelled 也保持，无重复，样例文件未变。C1 未到期任务重开后继续等待的可见流程与持久数据核验通过。下一轮先由用户取消这条测试提醒，避免它干扰 C2 的退出期间错过提醒案例；取消尚未执行，不提前记为通过。
+
+C1 收尾用户确认取消正确；后续审计确认原任务 revision=2、enabled=0、next_due=null，仍无执行记录，取消后的定义保留。
+
+### C2 退出期间错过提醒的前置对照（2026-11-22）
+
+用户创建 R5-C2 退出期间错过提醒，保存后立即正常退出，并确认托盘 D 消失、启动终端返回提示符。18:43:18 附近只读审计确认 task_id=0a29a0c6a7a4451cbd762c2f06cdaf70、revision=1、enabled=1、local_at=2026-11-22T18:47:00、Asia/Shanghai、once，next_due=2026-11-22T10:47:00+00:00，本任务无执行记录。全库六项安排，执行仍为原两条 done 和一条 cancelled，无重复，输入未变、输出不存在。应用完全退出由用户反馈确认，审计只读数据库、不启动调度器。下一轮要求保持退出直到 18:47:20 或之后再重开；此时尚未标记逾期恢复通过。
+
+C2 过期后重开一轮用户回复“正确”。18:55:42 附近审计已发现唯一执行 id=6a27aba7299f40a4974f4d548c9f05f6，task_id 保持，due_at=2026-11-22T10:47:00+00:00，reason=“逾期待处理。”，status=done，session_id/run_id 为空、evidence={}。因上轮要求先保留待处理，专门向用户核对；用户明确回答“是，我手动点击了完成”。因此记录为先出现逾期待处理、用户随后手动完成，不误判为调度器自动完成。
+
+当前全库六项安排、三条 done 与一条 cancelled，duplicate_due_groups=[]，输入文件未变，输出不存在；C1/A9 取消安排仍无执行记录。只读审计脚本使用 mode=ro 且仅 SELECT，不触发扫描或状态修改。C2 的逾期恢复与完成已有用户和持久记录证据，下一轮检查重复查看后同一条已完成历史仍保留。
+
+C2 收尾用户确认等待 20 秒、三次关闭/打开任务窗口后仍只有原已完成历史，六项安排、零项待处理。再次读库确认 execution_id=6a27aba7299f40a4974f4d548c9f05f6、due_at、done 状态及全库计数均不变，无重复到期组。C2 逾期恢复、手动完成及重复扫描不新增记录通过。
+
+### C3–C6 既有隔离实验与离线证据复核
+
+本轮只读复核验收准备阶段的 current-offline.xml（29 tests、0 failures/errors/skipped，24.183s）和 tests/test_scheduling.py、tests/test_schedule_experiments.py、examples/deskmate_schedules.py，未重新运行实验。以下结论沿用那次实际执行结果，不计为当前桌面人工制造或复现崩溃。
+
+| 清单项目 | 证据与边界 |
+| --- | --- |
+| C3 多个周期错过 | test_weekly_coalescing_edit_cancel_and_workspace_isolation 用可控时钟推进 29 天，重复扫描仍一条，原因含合并错过的 4 次，next_due 在未来；属于存储层周期合并验证，没有通过改系统时间或真实等待多周来验收 |
+| C4 已领取尚未执行中断 | test_real_process_crash_and_reopen_experiment[claimed] 调用真实隔离子进程 os._exit(71)，同库重开为 interrupted，实际写入次数 0，重复扫描不重放 |
+| C5 写入后终态未保存 | 同用例 [written] 在真实 WriteFile 成功、checkpoint 保存证据后硬退出；实际写入次数 1，重开后文件 bytes/mtime 与调用计数不变，恢复会话模型调用为 0 |
+| C6 工作区隔离 | 独立 a/b 库不共享定义或记录；复制数据文件到另一工作区后因 metadata 所属路径不符而拒绝加载，不默默迁移授权 |
+
+另复核 queued/awaiting_model/running/waiting 四种状态恢复为 interrupted、保留 session/run/evidence 的用例，以及未知写入阻止后续周期、明确重试只创建一条关联记录的用例。活实例所有权用例证明第二次打开不能把 running 改为 interrupted；接下来 C7 单独做同一 Windows 环境中的第二可见实例检查。未强制结束当前桌面应用，未跨 Windows/WSL 同写验收库，真实 Provider 仍未授权。
+
+### C7 同一 Windows 工作区的第二实例（2026-11-22）
+
+用户保持原 DeskMate 运行，在另一个 Windows PowerShell 使用相同工作区和占位 Provider 启动第二实例，回复“正确”：新窗口显示“配置/启动错误”，正文包含“该工作区已有活动调度器；请先退出另一实例”；原窗口仍就绪、六项安排、零项待处理。随后只读审计确认六项定义的 ID/revision/enabled/next_due 未变化，原四条执行仍为三条 done 与一条 cancelled，ID/due_at/status 均保持，没有新增 interrupted 或重复到期组；输入文件未变、输出不存在。
+
+本次可见检查时原实例没有进行中的模型运行；running 状态不被第二实例回收的证据来自前述离线 live_owner 用例。未启动 WSL 实例打开此库，不据此宣称跨内核并发受支持。阻止第二实例接管的检查通过，下一轮仅正常退出报错的第二个窗口，保留原实例供收尾检查。
+
+### D1 收尾与 UI1 修正后的完整离线回归（2026-11-22）
+
+C7 收尾用户回复“正确”：只退出第二个报错窗口，原实例仍运行。随后执行只读 audit.py，仍为六项安排、四条执行（三条 done、一条 cancelled），duplicate_due_groups=[]。所有原 ID、due_at、状态和取消定义保留；project_notes.md 为 220 bytes，SHA256 为 `5c708cbd1324f2504ec5b0952d7b0f16e4bf066213c8cb5e92df91b2cd5f435a`、mtime_ns=1795181309474078500，outputs/weekly-summary.md 不存在。完整审计保存在验收根目录的 final-audit-20261122.json；没有启动第二个调度器来做审计。
+
+鉴于本次人工验收中加入了 UI1 最小修正，重新执行完整离线回归、SubAgent、两个入口帮助及内存编译。下面均为本次新结果；先前 888 / 882+6 是修正前的历史证据，未改写为本次成绩。
+
+| 环境/检查 | 本次实际结果 | 证据 |
+| --- | --- | --- |
+| WSL Ubuntu-24.04 / cc，完整 pytest | 891 passed，0 skipped，XML time=67.817s | `/tmp/deskmate-r5-final-ui1-20261122-a.xml`，timestamp=2026-11-22T19:10:34.268472+08:00 |
+| Windows deskmate-win，完整 pytest | 885 passed、6 skipped，控制台 136.52s，退出 0 | Windows Temp 下 `deskmate-r5-final-ui1-win-20261122-b.xml`；891 cases、0 failures/errors，XML time=136.475s |
+| tests/verify_subagent.py | 双平台均 90/90，退出 0 | Windows Temp 下 `deskmate-r5-final-ui1-win-subagent-20261122.log`；WSL `/tmp/deskmate-r5-final-ui1-subagent-20261122.log` |
+| `python -m likecc --help` 与 `python -m likecc.desktop --help` | 双平台四次均退出 0 | 同一 Temp 或 `/tmp` 的 `deskmate-r5-final-ui1-*-help-20261122.log` |
+| 本轮 18 个修改/新增 Python 文件 | 双平台 AST 解析及内存 compile 全部通过，退出 0，不生成 pyc | Windows Temp 的 `deskmate-r5-final-ui1-win-compile-20261122.json`；WSL `/tmp/deskmate-r5-final-ui1-compile-20261122.json` |
+
+运行环境本次读取：Windows Python 3.12.7、SQLite 3.54.1、PySide6 6.8.3，解释器 `C:\Users\28436\.conda\envs\deskmate-win\python.exe`；WSL Python 3.11.16、SQLite 3.53.4、PySide6 6.8.3，解释器 `/home/ldj/anaconda3/envs/cc/bin/python`。SubAgent 日志中的 `failed: boom` 是异常任务测试的预期注入，汇总为 90/90。
+
+Windows 六项跳过原因保持原状：test_bash_process_group.py 四项、test_execution_contract.py 一项要求 POSIX 进程组；test_permissions.py 的 test_symlink_escape 未找到合适系统文件。不能以跳过视为 Windows 已覆盖这些契约。新增三项测试均来自 UI1 的启动/恢复越界及负坐标副屏；其他屏幕配置的人工覆盖没有因此扩大。
+
+完整 pytest 使用 QT_QPA_PLATFORM=offscreen、PYTHONDONTWRITEBYTECODE=1、PYTHONUTF8=1、`-q -ra -p no:cacheprovider`，basetemp 为对应 XML 去掉 `.xml` 的新目录。Windows 首次启动未留下可核验报告，之后改为明确的字面路径参数并使用全新 `...win-20261122-b` 完成；未把缺少证据的尝试计作通过。命令为：
+
+```powershell
+& D:/anaconda3/Scripts/conda.exe run --no-capture-output -n deskmate-win python -s -X utf8 -m pytest -q -ra -p no:cacheprovider --basetemp=C:/Users/28436/AppData/Local/Temp/deskmate-r5-final-ui1-win-20261122-b --junitxml=C:/Users/28436/AppData/Local/Temp/deskmate-r5-final-ui1-win-20261122-b.xml
+```
+
+```bash
+QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 /home/ldj/anaconda3/envs/cc/bin/python -m pytest -q -ra -p no:cacheprovider --basetemp=/tmp/deskmate-r5-final-ui1-20261122-a --junitxml=/tmp/deskmate-r5-final-ui1-20261122-a.xml
+```
+
+复现应换新 basetemp，不重用以上证据目录。所有测试数据在仓库外临时目录，两平台不共享 SQLite；Windows 正在运行的人工验收库仅 mode=ro 审计。完整套件此次也重新覆盖 B6–B9、C3–C6 的离线断言及 claimed/written 隔离子进程实验，仍不能等同于真实可见模型运行或强制结束实际桌面进程。
+
+当前人工证据：Windows P1/P2、A1–A9、B1–B5、C1/C2/C7 与 UI1 重启显示/拖动。A8 旧时间点由事后数据库核实，未现场观察。B6–B9 的模型执行流程、C3–C6 的周期/崩溃/隔离保留离线证据类别。真实 Provider 未授权、未执行。
+
+文档同步后 Git diff --check 通过，暂存区为空；分支仍为 feat/deskmate，HEAD 仍为 0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a，26 项已有修改/新增保留。未暂存、提交、推送或操作原 likecc 目录。
+
+### R1 真实 Provider 验收准备与单独授权
+
+已新建仓库外 `C:\Users\28436\AppData\Local\Temp\deskmate-r5-provider-20261122-a\workspace`，仅复制核验过的 project_notes.md 样例、建立空 outputs 目录，并写入无密钥项目配置。Provider 为 `deepseek-r5`，服务 DeepSeek、模型 `deepseek-flash`、Anthropic 兼容协议，thinking=true、context_window=1000000、max_output_tokens=4096。只解析配置并检查默认写入规则，无 client、任务库、模型请求或输出文件；未读取/复制真实 Key。未来使用 Windows deskmate-win，不与 WSL 共写库。
+
+具体 proposal.txt 位于该临时根目录，拟授权共三次 Agent 运行：一次只读前台任务等待用户输入以观察排队，再取消；一次定时资料任务拒绝写入；一次定时资料任务批准写入并回读。两项定时任务每次单独确认模型，验收后取消未来周期，不授予长期周期调用。只读样例 project_notes.md 和既有目标输出，只写 outputs/weekly-summary.md，URL 列表为空；相关工具为 ReadFile、AskUserQuestion、WriteFile 及必要的本地工具发现，不启用网页、Shell、子 Agent、Skills/MCP/Hook/记忆/摘要扩展。
+
+预计合计 8–15 次模型请求，不含 SDK 重试，这是估计而非硬上限；额外任务或新一轮重试需另行确认。模型拿到样例内容、任务、系统/工具说明和本次对话上下文，费用按实际 tokens 计算。期望只在批准案例生成 outputs/weekly-summary.md，另有 .likecc 下的任务、所有权和会话记录。权限流程为模型单次确认，再经现有工具权限卡片拒绝/批准写入；范围确认不替代写入决定。
+
+2026-11-22 仅浏览核对 [DeepSeek 官方 Anthropic 文档](https://api-docs.deepseek.com/guides/anthropic_api/) 与 [官方价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)，没有调用模型。Flash 每百万 tokens：空闲时段缓存未命中输入 1 元、命中 0.02 元、输出 4 元；高峰分别 2/0.04/8 元。举例 10 万未缓存输入加 1 万输出是 0.14 元或 0.28 元，并非本次账单或费用上限。服务端兼容处理和 SDK 重试可能影响用量，4096 配置值也不作为费用上限。没有查询余额或账单。
+
+准备完成时尚未对本次范围取得同意，标记为“真实 Provider 验收待完成”。普通验收反馈“正确”不自动视为计费授权。代码具备进入评审的离线证据，但不能宣布完整真实 Provider/桌面执行验收通过。所有改动保留工作区，暂存、提交、推送仍另行进行；不启动 R6。限制保持：一次性/每周、Asia/Shanghai/UTC、本地单调度器；不支持 Windows/WSL 同库并发，未知写入需核对且不承诺无损恢复或自动重放。R4 两项实网覆盖限制也保持。
+
+随后用户明确回复“同意上述三次真实 Provider 验收”。本次授权已取得，范围就是上述一次只读前台运行、一次定时拒绝写入、一次定时批准并回读；包括已告知的请求估计、SDK 重试可能性和按实际 tokens 计费，不自动扩大到额外任务或长期周期调用。2026-11-22 19:28 附近复核分支/HEAD 与准备目录，未读取凭据、未发模型请求。继续每轮一个人工步骤，先正常退出旧 r5-reminder-only 验收窗口，下一轮再准备新工作区的本地隐藏凭据输入与启动；此时退出和新启动均尚待用户反馈。
+
+用户随后回复“正确”，确认旧占位 Provider 窗口已正常退出、托盘消失、原启动终端返回提示符。2026-11-22 20:21 后在仓库外准备 launch.py，使用既有 Windows deskmate-win 解释器及原 `python -m likecc.desktop` 入口，工作区固定为新 provider workspace，不修改生产代码。启动器通过本机交互终端 getpass 隐藏读取 Key，非交互 stdin 直接拒绝；凭据仅用于 GUI 子进程环境，不放命令行参数或配置文件。它不改变父进程环境，不开启额外扩展，也不自动发送任何任务。
+
+本次实际只运行 check_preparation.py 与 `launch.py --check`，均退出 0：空 Key 配置、样例哈希、无任务库/输出、默认写入无 allow/deny 覆盖均符合准备状态；没有提示读取 Key、创建模型 client 或发请求。下一步由用户在可见 PowerShell 启动并反馈工作区、deepseek-r5 / deepseek-flash、就绪和零项安排；此时仍未取得新窗口的可见反馈，启动就绪也不等于 API 凭据或计费连通性已验证。没有重跑 pytest/SubAgent，不把预检算入三次模型运行。
+
+### R1 新工作区可见启动反馈
+
+用户回复“正确”：原生 Windows 窗口就绪，显示 deepseek-r5 / deepseek-flash、独立 provider workspace、零项安排和零项待处理/确认。20:24 后对新库执行 mode=ro 审计，tasks=[]、executions=[]、duplicate_due_groups=[]，输入仍为原 220 bytes/哈希/mtime，outputs/weekly-summary.md 不存在。证据保存到该临时根目录 startup-audit.json；新 session_20261122_202404_dkhd.jsonl 为 0 bytes。没有读取进程环境、Key 或配置原文，也没有发送模型任务。该反馈只证明可见启动，真实 API 凭据/计费连通性尚未验证。
+
+下一项先在桌面预览拒绝写入案例的周期定义，首次时间取用户操作时约十分钟后的北京时间、每周按当天星期重复，材料 project_notes.md、URL 空、输出 outputs/weekly-summary.md，模型保持每次确认。先预览并反馈，不保存、不点击允许模型；此时尚无新任务或模型执行通过的结论。
+
+该周期预览用户回复“正确”：时间/时区、每周规则、工作区、材料/输出以及 deepseek-r5 / deepseek-flash 的“每次执行前确认”符合表单要求。20:29:43 附近只读复核新库仍 tasks=[]、executions=[]、duplicate_due_groups=[]，样例哈希/大小/mtime 保持，输出不存在，说明尚未保存。下一轮只点击一次“确认保存以上预览”；保存后的 ID、实际到期时间和状态留待反馈后核验，不提前记为已创建或模型执行通过。
+
+保存后用户回复“正确”。20:30:53 附近只读核实唯一 task_id=990e5c8b0dc94e2f929007f6d03ceba5、revision=1、enabled=1、kind=execute，local_at=2026-11-22T20:40:45、Asia/Shanghai、weekly（每周日），next_due=2026-11-22T12:40:45.000000+00:00。材料 project_notes.md、URL 空、输出 outputs/weekly-summary.md、model_policy=ask；Provider 快照为 deepseek-r5 / deepseek-flash · 7515968330eb。尚无执行记录、无重复组，输入未变、输出不存在。真实 Provider 配置下的定义保存通过，实际模型任务仍未开始。
+
+下一步计划在北京时间 20:39:00 左右，由用户在前台发送已授权的只读配合任务：读取样例，调用 AskUserQuestion 显示一个文本问题并等待，不写文件、不访问网页；若已过该发送时间则直接执行，并按实际发生时间记录证据。预期前台进入“等待回复”，随后再允许到期的周期任务以验证排队。Interaction.wait() 现有超时为 300 秒，指导用户出现问题卡片后及时反馈，先不回答或取消；不自动延长超时、不新增重试或模型任务。此时尚未取得真实 API 或问答卡片的反馈。
+
+前台任务用户回复“正确”：样例已读，显示“前台占用验收：是否继续？”文本输入卡片，主窗口等待回复，没有写入卡片。20:39:49 后读库，R5-R2 定义仍等待 20:40:45 到期、执行列表为空，样例不变、输出不存在。前台属于三次授权中的第一次运行；此时运行尚未结束，当前会话 JSONL 仍为 0 bytes，不把它当成没有调用模型的证明，也不据此计算实际 API 请求数。下一步在 20:40:45 到期记录出现后，用户仅允许该次模型调用，保持前台问题不回答，观察 queued 和等待当前事务的原因；尚未标记排队通过。
+
+排队用户回复“正确”。20:41:35 后只读核实唯一 execution_id=dcd24a357a1d4f1fa4b5e1ff7eb9d89b，task_id 保持，due_at=2026-11-22T12:40:45.000000+00:00，status=queued，reason=“用户允许本次模型调用等待当前前台/定时事务结束；单次活动运行。”，session_id/run_id 为空、evidence={}，无重复，输入不变且输出不存在。定义下次时间推进到 2026-11-29 同一时刻，model_policy 仍为 ask；这次批准没有扩大为长期模型授权。原前台问题仍等待回复由用户确认。queued-audit.json 保存实际对照，前台忙时排队已有本次可见与数据库证据。下一步仅取消前台请求，让同一排队记录接续执行，等待 WriteFile 权限卡片；尚未宣称拒绝写入案例完成。
+
+### R2 操作偏差：写入权限等待时取消
+
+用户报告先点击前台问题卡片的取消，周期 WriteFile 权限卡片出现后，又点击底部“取消当前请求”，并提供主窗口截图。ChatWindow.show_requests() 的“取消运行”与底部取消入口均提交 cancel，因此第一次操作正确结束前台；第二次作用于已经接续的周期运行。这是本次操作偏差，不计为产品缺陷，也不把 cancelled 当成用户拒绝写入。
+
+20:44:18 后只读核实原 execution_id=dcd24a357a1d4f1fa4b5e1ff7eb9d89b 保留，status=cancelled，session_id=session_20261122_204236_rmx6，run_id=92fead53849e49e9bce9e8042be8053c；原 due_at 不变，retry_of=null，无重复组。evidence 保存 S1/project_notes.md 已读、S2/尚不存在的输出读取失败，artifacts=[]、digests={}、write_intents={}；tool_errors 为目标文件尚不存在的读取错误，不是“用户拒绝”记录。磁盘输出不存在，输入哈希/大小/mtime 不变。证据为临时根目录 cancelled-permission-audit.json。
+
+只读提取周期会话日志的结构摘要，保存 cancelled-run-details.json：两条 assistant 记录，工具请求为 ReadFile 样例、ReadFile 目标、WriteFile 目标；run_state 从 20:42:36.796344 running 到 20:42:44.722362 cancelled（+08:00）。两条 assistant 记录不是包含 SDK 重试的 API 请求总数，未查询账单。截图显示主窗口恢复到原前台 session_20261122_202404_dkhd、就绪、原前台 cancelled 对话和已读来源；这次额外取得“排队接续、权限等待取消、恢复原聊天且没有成果”的可见与持久证据。前台服务仍打开，JSONL 暂为 0 bytes，待正常关闭后再核对其日志，不因此重复发送任务。
+
+原授权三次运行已发生两次：前台配合与此次中途取消的周期运行；原第三次批准写入案例尚未进行。拒绝写入项仍待验证。已核对 ScheduleStore.retry() 可在保留当前 cancelled 历史的基础上创建新的 retry_of 记录，沿用相同快照并再次 awaiting_model；当前定义仍 enabled=1、model_policy=ask，下一周不会自动调用模型。补做拒绝案例将增加一次计费运行，需按此前明确的额外重试边界单独征求同意，尚未创建重试或发新请求。拟补做范围保持 DeepSeek/deepseek-flash、相同临时工作区、同一材料和输出、无 URL，约 3–5 次请求加可能的 SDK 重试，按此前说明的实际 tokens 计费；在 WriteFile 卡片选择“拒绝”后结束，预期无输出。若获同意，总运行授权为四次，不增加前台重复任务或长期周期授权。
+
+用户明确选择“跳过补做”。因此真实 Provider 的拒绝写入案例记为未完成：本次操作取消了运行，用户选择不增加计费重试；既有离线拒绝写入结论不受影响。没有创建 retry_of 或新增模型调用，原第三次批准写入并回读的授权继续有效，不再重复征求许可。20:47:50 附近复核仍是一项 enabled=1、model_policy=ask、下次 11 月 29 日的旧定义，以及原唯一 cancelled 执行，输入不变、输出不存在。下一步只由用户点击该定义的“取消安排”，停止未来周期并保留已取消执行历史，再准备原第三项；此时尚未收到取消定义的反馈。
+
+旧周期取消用户回复“正确”。20:50:38 附近只读核实 task_id=990e5c8b0dc94e2f929007f6d03ceba5 已 revision=2、enabled=0、next_due=null，原唯一 cancelled 执行的 ID、due_at、session/run/evidence 保持，无 retry_of 新尝试、无重复，输入未变、输出不存在。停止未来周期并保留历史的收尾通过。
+
+下一项在原已授权的第三次范围内，新建 R5-R3 批准写入案例的周期定义，先预览再反馈；时间取操作时约三分钟后的北京时间、每周按当天星期重复，材料/输出仍为 project_notes.md 和 outputs/weekly-summary.md，URL 空、model_policy=ask、同一 deepseek-r5 Provider。本轮没有创建新数据库记录或发模型请求，实际保存、单次允许、写入卡片批准及回读留待后续逐步操作。
+
+R5-R3 预览用户回复“正确”。20:53:23 附近只读核查仍只有旧 R5-R2 的 disabled 定义及原 cancelled 执行，R5-R3 尚未保存，输入未变、输出不存在。下一步只确认保存一次，再从安排下拉框选中 R5-R3 检查，避免界面保留旧选中项造成误认；未到期应无本任务执行，到期后应停在 awaiting_model，暂不允许模型。此时未新增真实运行。
+
+R5-R3 保存并选中核对获用户“正确”反馈。20:54:19 附近读库新增 task_id=9a871644b1de46ef89a0436da2441ac7、revision=1、enabled=1，首次本地时间 2026-11-22T20:55:00、Asia/Shanghai、weekly，材料/输出、空 URL 和 deepseek-r5 / deepseek-flash · 7515968330eb 均与授权范围一致，model_policy=ask。此时尚未到期，无本任务执行；旧 R5-R2 保持 disabled 及原 cancelled 历史，输入未变、输出不存在。接下来先由用户在主聊天输入框放置未发送的固定草稿，用于后续定时运行前后可见对照，不发送草稿、不增加第四次模型运行；实际草稿准备和运行后保留尚待反馈。
+
+用户确认主聊天输入框已放入未发送草稿“R5 草稿保留验收：这段文字暂不发送。”，主窗口仍就绪、没有新增聊天消息。20:56:10 附近只读核实 R5-R3 已有唯一 execution_id=d6b6fb8777af4f8bbafd119185c0c204，原定本地 20:55:00，status=awaiting_model、session_id/run_id 为空、retry_of=null；下一周同一时刻继续 ask。旧 R5-R2 仍停用且原 cancelled 历史不变，输入未变、输出不存在，完整对照保存在 approved-case-before-run-audit.json。下一轮由用户仅允许 R5-R3 当次模型并回主窗口等待 WriteFile 卡片；这是原授权第三次运行，尚未取得开始执行或写入批准的反馈。
+
+用户确认单次允许模型后出现 WriteFile 权限卡片，目标 outputs/weekly-summary.md、草稿仍在。20:57:58 附近读库为同一 execution_id、status=waiting，session_id=session_20261122_205710_6vpa、run_id=574d9786b2fa417790b9b20127fd95bc，与原前台及 R5-R2 会话均不同。已保存样例读取、目标尚不存在的读取错误，artifacts/digests/write_intents 仍空，输入未变、输出不存在；保存 approved-case-permission-audit.json。原第三次真实运行已开始，尚未批准写入。下一步只点这张卡片的“本次允许”，等待运行结束并核对原聊天与草稿恢复；成果写入/回读终态留待读库和任务历史验证，不以就绪状态代替成果成功。
+
+### R3 批准写入后的实际成果与回读
+
+用户回复“正确”，确认在 WriteFile 卡片点击“本次允许”后运行结束，主窗口恢复就绪、原前台聊天及完整未发送草稿。20:59:31 附近只读核实同一 execution_id=d6b6fb8777af4f8bbafd119185c0c204 为 completed，原定时间、task/session/run 均保持；实际 started_at=2026-11-22T12:57:10.244053+00:00，ended_at=2026-11-22T12:58:49.465929+00:00。artifacts 中 outputs/weekly-summary.md 为 verified，write_intents 为 written，保存 approved-case-completed-audit.json。
+
+磁盘产物 1823 bytes、mtime_ns=1795352327141623300、字节 SHA256=`bc64d8621bbefb6677a88e5874894d47e151b695cefef519deb7b2f37aafae3a`。按 R4 MaterialRead 的文本读取/换行规范核对，文本 SHA256=`93134977d6a25fefc88bdcb31076dc9efa622df8fddc8447c3b3ba07afcede32`，与持久 digests 一致。Windows 文件原始字节包含 CRLF，字节哈希与规范化文本哈希不能直接混比。样例仍为原 220 bytes/哈希/mtime，未修改。
+
+只读核验会话日志：四条 assistant 记录，工具请求依次为 ReadFile 输入、ReadFile 尚不存在的输出、WriteFile 输出、ReadFile 输出；唯一 WriteFile 成功，之后的 ReadFile 成功，run_state 为 running → completed。持久记录里的 S2 failed 和 tool_errors 对应最初不存在目标时的读取错误，不是写入拒绝或最终回读失败，最终 artifacts 单独为 verified。产物包含本周进度、下一步行动项、限制说明和工具来源账目；正文引用仅 S1。四条 assistant 记录不等于含 SDK 重试的实际 HTTP 请求总数，未核对平台账单。
+
+临时 check_completed.py 只读同库、产物和会话，不创建 Runtime。首次核验脚本因仅匹配相对路径而失败，实际工具用了授权范围内的绝对路径；改为解析后比较实际路径，并要求写入后存在成功回读，再次运行退出 0，保存 approved-case-evidence.json。这是核验脚本路径假设的修正，不是产品修复，没有再次调用模型或重跑完整离线套件。
+
+第三次授权运行已完成，运行后草稿/原聊天恢复有用户反馈，磁盘写入及回读有实际证据。下一步让用户在 R5-R3 的 20:55 历史记录中核对“运行结束”“已回读核对”和 session/run 展示；这项历史可见检查、取消未来周期及退出重开仍待继续。真实拒绝写入仍按用户选择保持未完成，不增加第四次运行。
+
+历史可见检查用户回复“正确”：R5-R3 原定 20:55 的记录显示运行结束，成果 outputs/weekly-summary.md 已回读核对，session_20261122_205710_6vpa 与 run_id=574d9786b2fa417790b9b20127fd95bc 正确。21:05:40 附近只读复核仍为原 completed/verified 记录，输入与输出的字节哈希、大小、mtime 均不变；没有新增模型运行。当前 R5-R3 定义仍 enabled=1、next_due 为下周同一时刻，R5-R2 已停用。下一步仅取消 R5-R3 的未来安排，要求 completed 历史与 verified 成果保持，再正常退出重开验证持久性；此时取消未来周期尚待反馈。
+
+R5-R3 取消未来安排用户确认“正确”，并要求汇总后续流程。21:08:30 附近只读核实两项定义均 revision=2、enabled=0、next_due=null；历史仍为原 R5-R2 cancelled 与 R5-R3 completed/verified，session/run 全部保持。输入和成果哈希/大小/mtime 未变，保存 before-restart-audit.json 作为重启前对照。未来周期停止已通过用户反馈和真实库核验，原三次模型运行均已结束。
+
+后续仅三轮人工收尾：正常退出，使用原 provider workspace 重开，查看任务历史确认取消定义和 completed/verified 成果保留。退出后及重开后由只读脚本核对数据库、原会话记录与文件哈希/mtime，确认没有重放或新增执行；不发送新消息或增加模型任务。然后同步最终文档与验收报告，明确真实拒绝写入由用户跳过、崩溃场景属于隔离自动化证据及平台限制。旧草稿的运行内保留已验证，本次不承诺跨应用退出保存草稿；未暂存、提交、推送或启动 R6。
+
+### 正常退出后的完整对照与剩余合并检查
+
+用户确认正常退出正确，要求把剩余步骤合并提供。21:11:12 附近只读检查保存 closed-audit.json，与 before-restart-audit.json 完全一致：两项定义停用、无未来时间，原 cancelled/completed 两条执行及 verified 证据保持，输入和输出哈希/大小/mtime 均未变化。
+
+关闭后实际读取三个会话的 JSONL：前台 4762 bytes、取消周期 4600 bytes、成功周期 9703 bytes；分别为 9/10/15 条记录、2/2/4 条 assistant 记录。三项 RUN_STATE 对应如下，合计恰好三个真实 Agent 运行，没有第四个运行；八条 assistant 记录仍不作为包含 SDK 重试的精确 API 请求总数或账单。
+
+| 会话 | run_id | 本地开始 → 结束 | 终态 |
+| --- | --- | --- | --- |
+| session_20261122_202404_dkhd | 96de7a5637d34f2fa807ba3c6f83d1ec | 20:39:02.294161 → 20:42:36.559884 | cancelled |
+| session_20261122_204236_rmx6 | 92fead53849e49e9bce9e8042be8053c | 20:42:36.796344 → 20:42:44.722362 | cancelled |
+| session_20261122_205710_6vpa | 574d9786b2fa417790b9b20127fd95bc | 20:57:10.269054 → 20:58:49.463930 | completed |
+
+只读 snapshot_files.py 保存 closed-files-snapshot.json，包含输入、输出、三个会话 JSONL 与三个 meta 共八个文件的大小、mtime 和 SHA256，以及不含消息正文的工具名/路径和状态摘要。该对照将在重启反馈后比较；当前没有再次启动桌面或发请求。分支/HEAD 保持原值，暂存区仍为空。
+
+剩余合并操作交给用户一次完成：用原 launch.py 在 Windows 重开同一 provider workspace，本地隐藏输入 Key；核对就绪、deepseek-r5/deepseek-flash、两项已取消安排及零待处理；查看 R5-R2 的 cancelled 历史和 R5-R3 的 completed/verified 历史与原 session/run。可同时只读打开生成 Markdown，核对进度、行动项与来源段落。主聊天启动为新空会话属于正常行为，未发送草稿不承诺跨退出恢复。统一反馈后再执行只读差异核对并出最终报告；此时尚未标记重启验收通过。
+
+## DeskMate R5 人工验收报告（2026-11-22）
+
+结论：本次约定范围的验收收尾完成，核心 Windows 桌面流程、真实 Provider 批准写入/回读及正常重启保留通过，具备进入代码评审和提交准备的条件。真实 Provider 拒绝写入案例未完成，用户明确选择跳过补做；它不计为人工通过，也不影响已有离线拒绝用例的通过结论。没有暂存、提交、推送或启动 R6。
+
+### 1. Git、运行环境与存储位置
+
+- 工作目录 `D:\ldj\03\DeskMate`，分支 `feat/deskmate`，HEAD 保持 `0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a`；26 项修改/新增保留，暂存区为空。原 `D:\ldj\03\likecc` 未作修改。
+- 人工桌面为原生 Windows / deskmate-win：Python 3.12.7、SQLite 3.54.1、PySide6 6.8.3。WSL Ubuntu-24.04 / cc 用于离线验证：Python 3.11.16、SQLite 3.53.4、PySide6 6.8.3。
+- 提醒工作区：`C:\Users\28436\AppData\Local\Temp\deskmate-r5-acceptance-0f5098c3\workspace`。真实 Provider 工作区：`C:\Users\28436\AppData\Local\Temp\deskmate-r5-provider-20261122-a\workspace`。全部样例和验收数据库位于仓库之外，没有使用私人资料。
+- 每个工作区的 `.likecc/schedules.sqlite3` 保存任务定义和单次执行，`.likecc/scheduler-lock.sqlite3` 保存本地所有权锁，`.likecc/sessions/` 保存会话。产物为真实 Provider 工作区的 `outputs/weekly-summary.md`。
+
+### 2. 一次性提醒
+
+P1/P2、A1–A9、C1/C2 的可见流程已逐项获用户反馈，并结合真实 SQLite 核实：自然语言预览、歧义澄清、表单确认、隐藏到期、重复扫描、完成、正常重启、修改未来时间、到期前取消、未到期重启和退出期间错过后的逾期待处理。提醒库最终六项定义、四条历史（三条 done、一条 cancelled），无重复到期组，样例不变、无输出。
+
+A8 的旧时间点没有现场观察，事后数据库证明旧时间无记录、新时间只有一条；不把它写成旧时间点的现场通过。C2 的 done 经用户明确说明是手动完成，不归因于自动完成。完全退出期间没有运行调度器，逾期只在重开后处理。
+
+### 3. 周期资料任务
+
+周期预览、范围核对、保存、修改、到期待确认、取消通过。真实 DeepSeek 案例证明前台 AskUserQuestion 等待时，到期任务经单次模型允许后排队，原因明确；前台取消后约 0.24 秒开始独立定时运行。模型批准与 WriteFile 权限卡片分别处理，未扩大为长期周期调用。
+
+R5-R2 在 WriteFile 权限等待时被用户取消，保存 cancelled、独立 session/run、已读来源和错误线索，磁盘没有成果。R5-R3 经一次“本次允许”完成唯一 WriteFile，再成功 ReadFile；数据库 completed、artifacts verified，原聊天和未发送草稿恢复均获用户确认。输出含进度、行动项、限制与来源，正文只引用实际已读的 S1。开始时读取尚不存在的目标产生的 S2 failed 仍作为历史保留，不是最终写入或回读失败。
+
+成功记录：task_id=`9a871644b1de46ef89a0436da2441ac7`，execution_id=`d6b6fb8777af4f8bbafd119185c0c204`，原定本地 20:55；session_id=`session_20261122_205710_6vpa`，run_id=`574d9786b2fa417790b9b20127fd95bc`。产物 1823 bytes，字节 SHA256=`bc64d8621bbefb6677a88e5874894d47e151b695cefef519deb7b2f37aafae3a`；规范化文本 SHA256=`93134977d6a25fefc88bdcb31076dc9efa622df8fddc8447c3b3ba07afcede32` 与持久回读摘要一致。
+
+### 4. 重启、中断恢复与所有权
+
+用户最终反馈“收尾全部正确”，确认同一工作区重开、两项取消定义、零待处理、原执行历史/会话标识和实际产物符合预期。21:17 后只读 compare_reopened.py 退出 0：closed-audit.json 与 final-reopened-audit.json 相同；八个原有输入/输出/会话文件的哈希、大小、mtime 全部相同；只有新空会话 session_20261122_211616_8efj 的 JSONL/meta 增加，其中无消息、工具或 RUN_STATE。原三个运行 ID/数量保持，无重复执行组，成果文本摘要仍匹配 verified 证据。两项安排均 enabled=0、next_due=null，保留过去的 cancelled/completed 历史，没有自动重放。
+
+尚未到期重启、错过一次性提醒及同一 Windows 第二实例被阻止有本次人工证据。周期跨多个时刻合并、工作区隔离、已领取未执行和可能写入但终态未存的硬退出由可控时钟、真实 SQLite 与隔离子进程测试覆盖：claimed 写入 0 次、written 写入 1 次，恢复后次数与文件不变。未为了人工验收强杀当前应用，不将这些离线实验称为可见桌面崩溃通过。
+
+恢复策略保持：多周期错过只处理最近一次；未知结果标为“已中断，待核对”，保留证据并阻止自动重放，查看后明确新尝试。第二个活实例不得接管或把活运行标为中断。
+
+### 5. 真实 Provider 授权与实际执行
+
+用户明确同意 DeepSeek / deepseek-flash 的三次运行，协议为 Anthropic 兼容；资料仅限指定样例与输出，无网页、Shell 或子 Agent。Key 由用户在本机隐藏输入，不显示、复制到配置或提交。三个运行终态为 cancelled、cancelled、completed，三组会话日志合计八条 assistant 记录。该数值不是包括 SDK 重试的精确请求数；未查询平台账单，不声称实际费用等于授权前示例。
+
+第二次操作取消后，用户明确“跳过补做”，没有第四次模型运行。重开仅创建空会话并读取历史，不增加模型任务。真实拒绝写入留为未完成，而真实权限等待取消与批准写入/回读分别按实际结果记录。
+
+### 6. 自动化证据与人工证据
+
+| 证据类别 | 实际结果 | 边界 |
+| --- | --- | --- |
+| Windows 完整离线回归 | 885 passed、6 skipped，136.52s，退出 0 | UI1 修正后于本轮实际运行；最终只重读/归档，没有再次运行 Windows 全套 |
+| WSL 完整离线回归 | 891 passed、0 skipped，96.06s，退出 0 | 最终收尾实际补跑，以保存可复核证据 |
+| SubAgent | 两平台均 90/90，退出 0 | Windows 本轮已有日志；WSL 收尾重新执行并归档 |
+| 两个入口帮助、18 个 Python 文件 AST/内存编译 | 两平台通过 | 不生成模型任务；Windows 沿用本轮实际结果，WSL 收尾补跑 |
+| Git diff --check | 通过；暂存区为空 | 未提交、推送 |
+| 可见人工 | 用户逐项反馈及截图，最后统一确认重开/历史/产物 | 本次为 Windows；不能推广为 WSLg 人工通过 |
+| 数据/磁盘核查 | 只读 SQLite、会话结构、文件哈希/mtime、回读摘要一致 | 不启动调度器或 Agent，不以状态文字代替实际文件 |
+
+先前 888 passed / 882 passed+6 skipped 是 UI1 修正前的历史记录。UI1 修正后曾实际运行 WSL 891 passed（67.817s），最终尝试重读该 `/tmp` XML 时文件已不存在，原因未确定；没有伪称再次读取成功。随后补跑 WSL 全套与支持检查，使用全新 `/tmp/deskmate-r5-closeout-20261122-b` 作为 basetemp，将 XML/log 直接保存到 Windows 独立验收根目录的 `verification/`，没有打开正在运行的 Windows 任务库。Windows 八份原证据也复制到同目录，SHA256 与原文件逐一相同。
+
+归档根为 `C:\Users\28436\AppData\Local\Temp\deskmate-r5-provider-20261122-a\verification`：WSL `wsl-full-closeout.xml`、`wsl-full-closeout.log`、`wsl-subagent-closeout.log`、两个 `wsl-*-help-closeout.log`、`wsl-compile-closeout.json`；Windows 为 `deskmate-r5-final-ui1-win-20261122-b.xml` 及对应 SubAgent/help/compile 日志，另有 UI1 定向及相关回归 XML。这里仍是临时验收目录，并非永久归档承诺。
+
+补跑命令与此前相同，仅使用新的 basetemp 和持久到本次 Windows 验收目录的报告路径：
+
+```bash
+QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 \
+  /home/ldj/anaconda3/envs/cc/bin/python -m pytest -q -ra -p no:cacheprovider \
+  --basetemp=/tmp/deskmate-r5-closeout-20261122-b \
+  --junitxml=/mnt/c/Users/28436/AppData/Local/Temp/deskmate-r5-provider-20261122-a/verification/wsl-full-closeout.xml
+```
+
+Windows 六项跳过仍为五项 POSIX 进程组契约及一项缺少合适系统文件的链接测试；没有新增跳过或弱化断言。pytest/子进程实验使用仓库外隔离工作区，两平台不共享任务数据库。
+
+### 7. 发现的问题与复现边界
+
+唯一新增产品问题 UI1：用户在提醒完成后退出重开，主窗口左侧/标题栏位于屏幕外、无法拖动，Alt+空格也未恢复。隔离 Qt 回归将窗口设置为 (-300,-180) 且大于可用屏幕，旧代码在首次显示与托盘恢复后仍越界；这复现了缺少恢复措施，不证明最初偏移的全部诱因。
+
+电脑控制工具截图超时/坐标输入失败属于工具通道限制；取消按钮操作偏差不是产品缺陷。核对脚本首次只接受相对路径的失败已修正为解析后比较实际路径，没有为此修改产品代码。目标初次读取不存在产生的历史错误不冒充最终回读失败。
+
+### 8. 已完成的最小修复
+
+`DesktopApplication._fit_window()` 在启动与托盘恢复显示后，用带 QObject 上下文的零延时回调核对各屏幕 availableGeometry，必要时调整大小与位置；合法负坐标副屏保持，最大化/全屏跳过，全部使用 Qt 逻辑像素。没有改变调度、权限、会话或数据库行为。
+
+新增三项定向回归，修正后通过；五个相关桌面文件 Windows/WSL 各 38 项通过，之后完整回归通过。用户正常重启确认窗口完整、标题栏可见且能拖动。原始偏移触发原因及其他屏幕组合仍未全面人工覆盖；布局最小尺寸超出屏幕时只保证标题栏可达。
+
+### 9. 未覆盖项目与保留限制
+
+- 真实 Provider 拒绝写入：用户误取消后选择跳过计费补做；离线允许/拒绝用例均通过。
+- 本轮 WSLg 可见 R5/真实 Provider、其他显示器/DPI/分辨率组合、真实 GUI 硬崩溃未人工验收；对应可自动化部分分别记录，不能互相替代。
+- 一次性与每周任务；时区仅 Asia/Shanghai、UTC；本地单调度器，不支持 Windows/WSL 同库并发或网络盘锁互操作。
+- 应用完全退出期间不准时执行或发系统通知；重开后处理逾期/合并。未知写入需人工核对，不承诺无损恢复或自动重放。未发送草稿只验证运行内保留，未承诺跨退出持久化。
+- R4 的真实 HTTP 响应流中途取消、实网重定向仍未覆盖。Windows 六项平台跳过如上。
+
+### 10. 提交准备结论与检查点
+
+可以按已记录范围进入 R5 代码评审和提交准备：核心主流程与真实批准写入/回读/重启通过，离线回归通过，UI1 已修正并复验，覆盖缺口明示。不得把真实拒绝写入或上述限制标为已经解决，也不能宣称所有平台/场景人工通过。实际暂存、提交、推送仍按用户指定流程另行进行，本轮不执行。
+
+| 检查点 | 本次最终依据 |
+| --- | --- |
+| R5-0 | 四个定向回归随双平台完整套件通过：关闭重试、URL 匹配、可复制来源、空正文状态 |
+| R5-A | 独立 SQLite 定义/单次执行、唯一领取、修改取消留历史、工作区所有权；实际读库与离线竞争/隔离用例 |
+| R5-B | Windows 隐藏到期、排队、独立会话、模型/工具分开确认、成果即时回读证据、正常重启和中断策略；拒绝的真实覆盖缺口保留 |
+| R5-C | 双平台离线、两个隔离实验、真实 Provider 指定范围、最终文件对照及学习/操作/路线文档已记录 |
+
+关键调用链仍为 `ScheduleWindow/ChatWindow → DesktopController → ScheduleStore → _tick_schedules/_start_scheduled → SessionService → Agent → ExecutionScope/PermissionChecker/Interaction → RunEvent → MaterialsWorkflow.checkpoint/_save_evidence → _finish_scheduled`。任务定义与单次结果分离，恢复只展示历史/等待核对，不把未知写入放回自动执行。
+
+## DeskMate 独立仓库迁移检查（2026-11-22）
+
+本次从本地 `D:\ldj\03\DeskMate` 的 `feat/deskmate` 克隆到 `D:\ldj\03\DeskMate-Standalone`，使用 `--single-branch --no-tags --no-hardlinks`，开发分支改为 `main`。源分支 HEAD 为 `0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a`，暂存区为空；R5 的 17 个已修改文件及 9 个新增文件尚未提交，全部迁入新副本。迁移期间补充的最终人工验收文档也已重新核对并带入。
+
+- 逐文件核对 210 个已跟踪文件及 9 个新增文件，共 219 项；源码、测试、示例、`pyproject.toml` 和 `uv.lock` 与源工作区一致。独立仓库额外修改仅为 README、忽略规则及本节迁移说明。
+- 原有 6 个可达提交及 SHA 全部保留，非浅克隆，无 Git alternates；LICENSE 原样保留，历史文档中的原仓库固定提交链接保留。新增 SQLite 建表/恢复代码、公开配置模板与测试数据构造代码均在版本内。
+- 未复制运行生成的 `.likecc/`、SQLite 数据库及 WAL/SHM、个人会话/凭据/日志、虚拟环境或 `.r1-verification/`。源目录与原远程保持为来源，不在源目录暂存或提交。
+- 在新目录使用 Windows `deskmate-win` Python 3.12.7 重新执行完整离线套件：**885 passed、6 skipped、0 failures/errors，147.86 秒，退出码 0**。JUnit 共 891 cases，XML time=147.792s。六项跳过仍为五项 POSIX 进程组契约及一项无适合系统文件的符号链接用例。
+- 本次 190 个 Python 文件完成 AST 与内存编译检查，不生成 pyc。此前 WSL 891 passed、双平台 SubAgent 90/90 和可见/真实 Provider 结果保留为前述验收记录，本次迁移未重跑这些验收或新增真实模型调用。
+
+迁移回归命令（在新目录执行；临时路径每次换新）：
+
+```powershell
+$env:QT_QPA_PLATFORM = 'offscreen'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:PYTHONUTF8 = '1'
+python -s -X utf8 -m pytest -q -ra -p no:cacheprovider --basetemp=<全新临时目录> --junitxml=<临时报告路径>
+```
+
+本次日志与 JUnit 报告在源码库外保存。R5 状态按上文最终人工验收报告区分：离线回归、Windows 可见验收和真实 DeepSeek 指定主流程分别成立；真实拒绝写入仍为用户跳过的未完成项，不扩大为所有平台或崩溃场景人工通过。

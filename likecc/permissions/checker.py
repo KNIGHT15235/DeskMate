@@ -36,9 +36,15 @@ class PermissionChecker:
         self.mode = mode
         self.plan_file_path: str = ""
         self.materials = None
+        self.scheduled_scope = None
 
 
     def check(self, tool: Tool, arguments: dict[str, Any]) -> Decision:
+        if self.scheduled_scope is not None:
+            try:
+                self.scheduled_scope.check(tool, arguments)
+            except (OSError, RuntimeError, ValueError) as exc:
+                return Decision("deny", str(exc))
         content = extract_content(tool.name, arguments)
         sandbox_path = extract_path(tool.name, arguments)
 

@@ -13,6 +13,10 @@ from pathlib import Path
 import threading
 from tempfile import TemporaryDirectory
 import uuid
+import hashlib
+import json
+import re
+from dataclasses import asdict
 
 from likecc.config import AppConfig, ConfigError, ProviderConfig, load_config
 from likecc.affairs import install_materials_profile
@@ -20,6 +24,7 @@ from likecc.extensions import ExtensionOptions, RuntimeExtensions
 from likecc.permissions import PermissionMode
 from likecc.runtime import Runtime
 from likecc.service import SessionService
+from likecc.scheduling import ScheduleStore, TaskSpec, ExecutionScope, parse_schedule, utc_now, stamp
 
 MAX_ROWS = 200
 MAX_TEXT = 12000
@@ -42,15 +47,17 @@ class DesktopOptions:
 
 
 class DesktopController:
-    def __init__(self, options: DesktopOptions, *, runtime_factory=Runtime):
+    def __init__(self, options: DesktopOptions, *, runtime_factory=Runtime, clock=utc_now):
         self._options = options
         self._runtime_factory = runtime_factory
+        self._clock = clock
         self._lock = threading.Lock()
         self._receipts = {}
         self._view = {"revision": 0, "state": "starting", "session_id": "", "run_id": "",
                       "rows": [], "pending": [], "sessions": [], "notice": "",
                       "command": None, "demo": options.demo, "workspace": "", "provider": "",
-                      "worker_thread": None, "materials": None}
+                      "worker_thread": None, "materials": None, "tasks": [], "executions": [],
+                      "schedule_draft": None, "scheduled_execution": None, "scheduler_error": ""}
         self._loop = None
         self._close_requested = threading.Event()
         self._shutdown_error = None
@@ -186,6 +193,12 @@ class DesktopController:
         self._affairs = None
         self._demo_dir = None
         self._closing = False
+        self._store = self._scheduled_runtime = self._scheduled_service = self._scheduled_affairs = None
+        self._execution_id = self._foreground_view = self._schedule_draft = None
+        self._evidence_errors = []
+        self._scheduled_cancel_requested = False
+        self._tick_lock = asyncio.Lock()
+        self._poller = asyncio.create_task(self._scheduler_loop())
         self._set(worker_thread=threading.get_ident())
         try:
             opening = asyncio.create_task(self._open(self._options))
@@ -198,6 +211,8 @@ class DesktopController:
             await self._stop.wait()
         finally:
             self._closing = True
+            self._poller.cancel()
+            await asyncio.gather(self._poller, return_exceptions=True)
             for task in list(self._commands):
                 task.cancel()
             await asyncio.gather(*self._commands, return_exceptions=True)
@@ -207,6 +222,10 @@ class DesktopController:
                 self._loop = None
 
     async def _release(self):
+        if self._scheduled_runtime:
+            await self._scheduled_runtime.aclose()
+            if self._consumer:
+                await asyncio.gather(self._consumer, return_exceptions=True)
         if self._runtime:
             try:
                 await self._runtime.aclose()
@@ -216,6 +235,11 @@ class DesktopController:
             await asyncio.gather(self._consumer, return_exceptions=True)
         self._runtime = self._service = self._run = self._consumer = None
         self._affairs = None
+        self._scheduled_runtime = self._scheduled_service = self._scheduled_affairs = None
+        self._execution_id = self._foreground_view = None
+        if self._store:
+            self._store.close()
+            self._store = None
         if self._demo_dir:
             try:
                 self._demo_dir.cleanup()
@@ -224,7 +248,9 @@ class DesktopController:
             self._demo_dir = None
 
     async def _open(self, options):
-        self._set(state="starting", pending=[], workspace="", provider="", session_id="", sessions=[], run_id="", materials=None)
+        self._set(state="starting", pending=[], workspace="", provider="", session_id="", sessions=[], run_id="", materials=None,
+                  tasks=[], executions=[], schedule_draft=None, scheduler_error="")
+        self._schedule_draft = None
         released = False
         try:
             await self._release()
@@ -268,10 +294,14 @@ class DesktopController:
             self._service = SessionService(self._runtime, persistent=True,
                 memory=options.memory and not options.demo, summaries=options.summaries and not options.demo,
                 affairs=self._affairs)
+            self._store = ScheduleStore(workspace, clock=self._clock)
             self._options = options
-            self._set(state="idle", rows=[], pending=[], run_id="", notice="",
-                      session_id=self._service.session.session_id, materials=self._materials())
             self._sessions()
+            # Publish readiness together with restored history. File I/O can
+            # release the GIL, so publishing idle first exposes a partial view.
+            self._set(state="idle", rows=[], pending=[], run_id="", notice="",
+                      session_id=self._service.session.session_id, materials=self._materials(),
+                      tasks=self._store.tasks(), executions=self._store.executions())
         except Exception as exc:
             detail = "配置结构或 YAML 格式无效（不展示可能含凭据的原始配置片段）" if isinstance(exc, ConfigError) else str(exc)
             if released:
@@ -317,6 +347,8 @@ class DesktopController:
                 if not self._run.reply(data["run_id"], data["request_id"], value):
                     raise RuntimeError("后端未接受回复：请求已过期或已处理")
                 self._set(pending=[], state="running")
+            elif command.startswith("schedule_"):
+                await self._schedule_command(command, data)
             elif command in {"send", "new", "resume", "open", "demo"}:
                 if state not in {"idle", "error"}:
                     raise RuntimeError("运行或启动期间不能提交、切换会话/工作区/Provider")
@@ -332,6 +364,10 @@ class DesktopController:
                         prompt = data["text"].strip()
                         if not prompt:
                             raise ValueError("输入不能为空")
+                        if re.search(r"每周|明天.*提醒|明晚.*提醒|\d{4}-\d{2}-\d{2}.*提醒", prompt):
+                            self._prepare_schedule(parse_schedule(prompt, now=self._clock()))
+                            self._ack(command_id, True, "已解析安排，请核对时间、时区、范围后确认保存")
+                            return
                         self._run = self._service.start(prompt, interactive=True, permission_timeout=self._options.permission_timeout)
                         self._set(state="running", run_id=self._run.run_id, pending=[], materials=self._materials())
                         self._row("user", prompt)
@@ -363,8 +399,175 @@ class DesktopController:
         self._set(sessions=[{"id": m.id, "title": m.title or "未命名", "count": m.message_count}
                             for m in self._service.session_manager.list()[:100]])
 
+    def _provider_identity(self):
+        p = self._runtime.provider
+        fingerprint = hashlib.sha256(f"{p.protocol}\n{p.base_url}\n{p.model}".encode()).hexdigest()[:12]
+        return f"{p.name} / {p.model} · {fingerprint}"
+
+    def _schedule_view(self):
+        if self._store:
+            self._set(tasks=self._store.tasks(), executions=self._store.executions())
+
+    def _prepare_schedule(self, spec, *, task_id=None, revision=None):
+        if not self._store or not self._runtime:
+            raise RuntimeError("请先打开工作区")
+        if spec.kind == "execute" and self._options.demo:
+            raise ValueError("临时演示工作区只演示提醒；资料定时执行请使用持久工作区")
+        spec.provider = self._provider_identity() if spec.kind == "execute" else ""
+        spec = spec.validated(self._store.workspace)
+        self._schedule_draft = {"token": uuid.uuid4().hex, "spec": asdict(spec),
+            "workspace": self._store.workspace, "task_id": task_id, "revision": revision}
+        self._set(schedule_draft=deepcopy(self._schedule_draft))
+
+    async def _schedule_command(self, command, data):
+        if not self._store:
+            raise RuntimeError("调度器未就绪")
+        if command == "schedule_preview":
+            spec = TaskSpec(**data["spec"]) if "spec" in data else parse_schedule(
+                data["text"], now=self._clock(), timezone_name=data.get("timezone", "Asia/Shanghai"))
+            self._prepare_schedule(spec, task_id=data.get("task_id"), revision=data.get("revision"))
+        elif command == "schedule_confirm":
+            draft = self._schedule_draft
+            if not draft or draft["token"] != data["token"]:
+                raise ValueError("预览已变化，请重新核对")
+            self._store.save(TaskSpec(**draft["spec"]), task_id=draft["task_id"], revision=draft["revision"])
+            self._schedule_draft = None
+            self._set(schedule_draft=None)
+        elif command == "schedule_discard":
+            self._schedule_draft = None
+            self._set(schedule_draft=None)
+        elif command == "schedule_cancel":
+            self._store.cancel(data["task_id"])
+            if self._execution_id and self._store.execution(self._execution_id)["task_id"] == data["task_id"]:
+                self._scheduled_cancel_requested = True
+                if self._run:
+                    await self._run.cancel()
+        elif command == "schedule_complete":
+            self._store.complete_reminder(data["execution_id"])
+        elif command == "schedule_allow_model":
+            self._store.approve_model(data["execution_id"])
+        elif command == "schedule_retry":
+            if data.get("reviewed") is not True:
+                raise ValueError("请先核对旧次会话、成果和磁盘状态")
+            self._store.retry(data["execution_id"])
+        elif command == "schedule_scan":
+            await self._tick_schedules()
+        else:
+            raise ValueError("未知调度命令")
+        self._schedule_view()
+
+    async def _scheduler_loop(self):
+        while True:
+            await asyncio.sleep(0.25)
+            try:
+                await self._tick_schedules()
+            except Exception as exc:
+                # Keep the UI available; do not silently lose the polling task.
+                self._set(scheduler_error=f"调度暂停：{type(exc).__name__}: {exc}")
+
+    async def _tick_schedules(self):
+        async with self._tick_lock:
+            if self._closing or self._close_requested.is_set() or not self._store:
+                return
+            if self.snapshot()["state"] in {"starting", "error", "closing", "closed"}:
+                return
+            self._store.scan()
+            rows = [e for e in reversed(self._store.executions()) if e["status"] == "queued"]
+            if rows and (self._run is not None or self.snapshot()["state"] != "idle"):
+                for row in rows:
+                    if "等待当前" not in row["reason"]:
+                        self._store.update(row["id"], reason=row["reason"] + "等待当前前台/定时事务结束；单次活动运行。")
+            elif rows:
+                await self._start_scheduled(rows[0])
+            if self.snapshot()["scheduler_error"]:
+                self._set(scheduler_error="")
+            self._schedule_view()
+
+    def _save_evidence(self):
+        if self._execution_id and self._scheduled_affairs:
+            evidence = self._scheduled_affairs.summary()
+            evidence["digests"] = {p: e.get("digest") for p, e in self._scheduled_affairs.artifacts.items()}
+            evidence["write_intents"] = deepcopy(self._scheduled_affairs.write_intents)
+            evidence["tool_errors"] = list(self._evidence_errors)
+            self._store.update(self._execution_id, evidence=evidence)
+
+    async def _start_scheduled(self, row):
+        spec = row["snapshot"]
+        if spec["provider"] != self._provider_identity():
+            self._store.update(row["id"], status="awaiting_model", reason="模型配置已变化；请编辑安排并重新预览确认新模型范围")
+            return
+        if not self._store.start(row["id"]):
+            return
+        self._execution_id = row["id"]
+        self._scheduled_cancel_requested = False
+        current = self.snapshot()
+        self._foreground_view = {k: current.get(k) for k in ("rows", "session_id", "run_id", "materials", "notice", "last_status")}
+        self._set(state="running", rows=[], pending=[], scheduled_execution=row["id"],
+            notice="正在处理定时资料任务；结束后恢复原聊天，草稿保留。")
+        try:
+            # A fresh Runtime keeps foreground conversation/context fully intact.
+            # Only one RunHandle is active; the same _consume is the sole reader.
+            runtime = self._runtime_factory(config=self._runtime.config, work_dir=self._store.workspace,
+                permission_mode=PermissionMode.DEFAULT, user_home=self._runtime.user_home,
+                client_factory=self._runtime._client_factory)
+            self._scheduled_runtime = runtime
+            runtime.retry_close_errors = True
+            await runtime.initialize(self._runtime.provider)
+            self._scheduled_affairs = install_materials_profile(runtime)
+            extensions = RuntimeExtensions(runtime, ExtensionOptions(interactive_tools=True))
+            await extensions.initialize()
+            runtime.checker.scheduled_scope = ExecutionScope(spec)
+            if self._scheduled_cancel_requested or self._close_requested.is_set():
+                self._store.update(row["id"], status="cancelled" if self._scheduled_cancel_requested else "interrupted",
+                    ended_at=stamp(self._clock()), reason="启动期间取消/退出；没有启动模型执行")
+                await runtime.aclose()
+                self._restore_foreground()
+                return
+            self._scheduled_service = SessionService(runtime, persistent=True, affairs=self._scheduled_affairs)
+            self._evidence_errors = []
+            self._scheduled_affairs.on_change = self._save_evidence
+            prompt = (spec["content"] + "\n本次已确认范围（不能从网页或模型回答扩大）：\n" +
+                json.dumps({k: spec[k] for k in ("workspace", "files", "urls", "outputs")}, ensure_ascii=False) +
+                "\n读取需要更新的现有输出后再写入，写入后用 ReadFile 回读核对。")
+            self._run = self._scheduled_service.start(prompt, interactive=True, permission_timeout=self._options.permission_timeout)
+            self._scheduled_affairs.urls = set(spec["urls"])
+            self._store.update(row["id"], session_id=self._run.session_id, run_id=self._run.run_id)
+            self._set(session_id=self._run.session_id, run_id=self._run.run_id, materials=self._materials())
+            self._row("user", prompt)
+            self._consumer = asyncio.create_task(self._consume(self._run))
+        except BaseException:
+            self._store.update(row["id"], status="interrupted", ended_at=stamp(self._clock()),
+                reason="定时运行启动中断，请查看会话及成果后明确重试")
+            if self._scheduled_runtime:
+                await self._scheduled_runtime.aclose()
+            self._restore_foreground()
+            raise
+
+    def _restore_foreground(self):
+        self._scheduled_runtime = self._scheduled_service = self._scheduled_affairs = None
+        self._execution_id = None
+        self._set(**(self._foreground_view or {}), scheduled_execution=None,
+            state="closing" if self._closing else "idle", pending=[],
+            tasks=self._store.tasks(), executions=self._store.executions())
+        self._foreground_view = None
+
+    async def _finish_scheduled(self, run):
+        self._save_evidence()
+        summary = self._scheduled_affairs.summary()
+        status = "interrupted" if self._closing else run.status
+        outputs = summary["artifacts"]
+        reason = ("应用退出中断，请核对已有成果再明确重试。" if self._closing else
+            "运行结束；" + ("成果状态见回读证据。" if outputs else "没有已写入的成果。"))
+        if self._evidence_errors:
+            reason += "存在工具拒绝或失败，详见本次证据。"
+        self._store.update(self._execution_id, status=status, ended_at=stamp(self._clock()), reason=reason)
+        await self._scheduled_runtime.aclose()
+        self._restore_foreground()
+        self._schedule_view()
+
     def _materials(self):
-        return self._affairs.summary() if self._affairs is not None else None
+        affairs = self._scheduled_affairs if self._execution_id else self._affairs
+        return affairs.summary() if affairs is not None else None
 
     async def _consume(self, run):
         try:
@@ -377,6 +580,14 @@ class DesktopController:
             self._row("error", f"运行失败：{type(exc).__name__}: {exc}")
         finally:
             if self._run is run:
+                if self._execution_id:
+                    try:
+                        await self._finish_scheduled(run)
+                    except Exception as exc:
+                        self._run = None
+                        self._set(state="error", pending=[], scheduler_error=f"执行证据或资源收尾失败：{exc}；停止后续执行，请核对后重新打开工作区")
+                        self._row("error", "定时执行收尾失败，已停止后续领取；已有成果可能存在。")
+                        return
                 self._set(pending=[], state="closing" if self._closing else "idle")
                 self._run = None
                 self._sessions()
@@ -385,6 +596,16 @@ class DesktopController:
         if event["run_id"] != self.snapshot()["run_id"] or event["session_id"] != self.snapshot()["session_id"]:
             return
         kind, data = event["type"], event["data"]
+        if self._execution_id:
+            if kind in {"PermissionRequest", "UserInputRequest"}:
+                self._store.update(self._execution_id, status="waiting", reason="需要本次权限决定或补充信息；请打开窗口处理")
+            elif kind == "ToolResultEvent":
+                if data["is_error"]:
+                    self._evidence_errors.append({"tool_id": data["tool_id"], "output": data["output"][:3000]})
+                self._store.update(self._execution_id, status="running")
+            if kind in {"PermissionRequest", "UserInputRequest", "ToolResultEvent", "LoopComplete", "ErrorEvent"}:
+                self._save_evidence()
+                self._schedule_view()
         if kind == "StreamText":
             self._text(data["text"])
         elif kind in {"PermissionRequest", "UserInputRequest"}:
@@ -398,7 +619,7 @@ class DesktopController:
         elif kind == "ToolResultEvent":
             self._row("tool_error" if data["is_error"] else "result", data["output"], tool_id=data["tool_id"])
             with self._lock:
-                if self._affairs is not None:
+                if self._affairs is not None or self._scheduled_affairs is not None:
                     self._view["materials"] = self._materials()
                     self._view["revision"] += 1
                 pending = self._view["pending"]

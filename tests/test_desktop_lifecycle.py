@@ -3,7 +3,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 pytest.importorskip("PySide6", reason="optional desktop extra")
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QPoint, QRect
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from likecc.desktop.application import DesktopApplication
@@ -95,6 +96,74 @@ def test_no_tray_close_dialog_minimize_cancel_and_exit(lifecycle):
     owner.request_exit()
     owner.poll()
     assert quit_calls == [True]
+
+
+@pytest.mark.parametrize("phase", ["startup", "restore"])
+def test_offscreen_window_becomes_reachable_without_losing_draft(monkeypatch, phase):
+    from likecc.desktop import application
+
+    app = QApplication.instance() or QApplication([])
+    available = app.primaryScreen().availableGeometry()
+    original_window = application.ChatWindow
+
+    def displace(window):
+        window.resize(available.width() + 100, available.height() + 100)
+        window.move(available.topLeft() - QPoint(300, 180))
+
+    def make_window(*args):
+        window = original_window(*args)
+        window.input.setPlainText("保留未发送草稿")
+        if phase == "startup":
+            displace(window)
+        return window
+
+    monkeypatch.setattr(application, "ChatWindow", make_window)
+    options = DesktopOptions(demo=True)
+    c = DesktopController(options)
+    owner = None
+    try:
+        owner = DesktopApplication(app, c, options, tray_probe=lambda: True,
+                                   tray_factory=FakeTray, quit_callback=lambda: None)
+        spin(lambda: c.snapshot()["state"] == "idle")
+        session = c.snapshot()["session_id"]
+        if phase == "restore":
+            displace(owner.window)
+            owner.close_window()
+            assert not owner.window.isVisible()
+            owner.show_window()
+        QTest.qWait(30)
+        assert available.contains(owner.window.frameGeometry())
+        assert owner.window.input.toPlainText() == "保留未发送草稿"
+        assert c.snapshot()["session_id"] == session
+        assert c.snapshot()["state"] == "idle"
+        assert not c.snapshot()["tasks"] and not c.snapshot()["executions"]
+    finally:
+        c.request_close()
+        spin(lambda: not c.is_alive)
+        if owner is not None:
+            owner.dispose()
+
+
+def test_restore_preserves_reachable_negative_monitor_position(lifecycle, monkeypatch):
+    from types import SimpleNamespace
+
+    owner, _, _, _ = lifecycle
+    # A display to the left of the primary has legitimate negative coordinates.
+    area = QRect(-1600, -200, 1600, 1200)
+    left = SimpleNamespace(availableGeometry=lambda: area)
+    monkeypatch.setattr(owner.app, "screens", lambda: [left, owner.app.primaryScreen()])
+    owner.window.resize(900, 780)
+    owner.window.move(-1500, -100)
+    before = owner.window.frameGeometry()
+    assert area.contains(before)
+    owner.close_window()
+    owner.show_window()
+    QTest.qWait(30)
+    after = owner.window.frameGeometry()
+    assert area.contains(after)
+    assert after.size() == before.size()
+    # The offscreen Qt plugin shifts the native frame by its two-pixel border on show.
+    assert (after.topLeft() - before.topLeft()).manhattanLength() <= 8
 
 
 def test_exit_while_permission_pending_and_late_commands_rejected(lifecycle):

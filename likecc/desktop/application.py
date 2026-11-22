@@ -64,6 +64,7 @@ class DesktopApplication(QObject):
             self.timer.start()
             self.poll()
             self.window.show()
+            QTimer.singleShot(0, self, self._fit_window)
         except BaseException as exc:
             try:
                 self.dispose()
@@ -97,6 +98,36 @@ class DesktopApplication(QObject):
         self.window.raise_()
         self.window.activateWindow()
         self.window.refresh()
+        QTimer.singleShot(0, self, self._fit_window)
+
+    def _fit_window(self):
+        """Keep the native frame reachable after show/restore has settled."""
+        window = self.window
+        if (self._disposed or window is None or not window.isVisible()
+                or window.isMaximized() or window.isFullScreen()):
+            return
+        areas = [screen.availableGeometry() for screen in self.app.screens()]
+        frame = window.frameGeometry()
+        if not areas or any(area.contains(frame) for area in areas):
+            return  # Negative coordinates can belong to a real secondary display.
+
+        def overlap(area):
+            intersection = area.intersected(frame)
+            return max(0, intersection.width()) * max(0, intersection.height())
+
+        area = max(areas, key=overlap)
+        if not overlap(area):
+            screen = window.screen() or self.app.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+        # Qt geometry is already in logical pixels; don't multiply by device DPR.
+        border = frame.size() - window.size()
+        window.resize(min(window.width(), max(1, area.width() - border.width())),
+                      min(window.height(), max(1, area.height() - border.height())))
+        frame = window.frameGeometry()
+        # If a layout minimum exceeds the screen, at least keep the title bar reachable.
+        window.move(max(area.left(), min(frame.left(), area.right() - frame.width() + 1)),
+                    max(area.top(), min(frame.top(), area.bottom() - frame.height() + 1)))
 
     @property
     def is_closing(self) -> bool:

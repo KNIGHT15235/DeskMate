@@ -173,10 +173,11 @@ class FetchWebPage(Tool):
         except (ValueError, LookupError) as exc:
             return self._failure(initial, url, str(exc))
         truncated = len(body) > MAX_TEXT
-        source = self.workflow.record("web", str(initial), "truncated" if truncated else "read",
+        status = "empty" if not body.strip() else "truncated" if truncated else "read"
+        source = self.workflow.record("web", str(initial), status,
                                       final_url=str(url), title=title, time=self._time())
         return ToolResult(f"{source['id']} | {source['status']} | {title}\n输入 URL: {initial}\n"
-                          f"最终 URL: {url}\n读取时间: {source['time']}\n资料正文：\n{body[:MAX_TEXT]}")
+                          f"最终 URL: {url}\n读取时间: {source['time']}\n资料正文：\n{body[:MAX_TEXT] or '无可用正文'}")
 
     def _failure(self, initial, url, reason):
         now = self._time()

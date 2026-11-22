@@ -28,6 +28,8 @@ class ChatWindow(QMainWindow):
         self._pending_key = None
         self._draft = None
         self._reply = None
+        self.schedule_window = None
+        self._shown_schedule_token = None
         self.setWindowTitle("DeskMate 桌伴")
         self.resize(920, 780)
         root = QWidget()
@@ -48,6 +50,9 @@ class ChatWindow(QMainWindow):
         layout.addLayout(settings)
         self.info = label()
         layout.addWidget(self.info)
+        self.task_button = QPushButton("任务与执行记录")
+        self.task_button.clicked.connect(self.show_schedules)
+        layout.addWidget(self.task_button)
         sessions = QHBoxLayout()
         self.sessions = QComboBox()
         self.sessions.setMinimumContentsLength(28)
@@ -103,6 +108,14 @@ class ChatWindow(QMainWindow):
                 self._draft = (command_id, version)
                 self.send_button.setEnabled(False)
 
+    def show_schedules(self):
+        if self.schedule_window is None:
+            from .schedules import ScheduleWindow
+            self.schedule_window = ScheduleWindow(self.controller, self._submit, self)
+        self.schedule_window.refresh()
+        self.schedule_window.show()
+        self.schedule_window.raise_()
+
     def _submit(self, command, **data):
         command_id = self.controller.submit_ui(command, **data)
         if command_id is None and (self.lifecycle is None or not self.lifecycle.is_closing):
@@ -133,6 +146,12 @@ class ChatWindow(QMainWindow):
         self.input.setPlaceholderText("输入任务；离线演示会依次请求写文件、问答，可选择等待取消" if state["demo"] else
             "提供公开网页 URL、工作区内的文本或 Markdown，以及要生成的 Markdown 路径")
         self.show_materials(state.get("materials"))
+        outstanding = sum(e["status"] in {"pending", "awaiting_model", "waiting", "interrupted", "blocked_review"} for e in state.get("executions", []))
+        self.task_button.setText(f"任务与执行记录 · {len(state.get('tasks', []))} 项安排 · {outstanding} 项待处理/确认")
+        draft = state.get("schedule_draft")
+        if draft and draft["token"] != self._shown_schedule_token and self.isVisible():
+            self._shown_schedule_token = draft["token"]
+            self.show_schedules()
         self.info.setText(f"工作区：{state['workspace']}\n模型：{state['provider']}\n会话：{state['session_id']}")
         selected = self.sessions.currentData()
         items = [(m["id"], f"{m['title'][:50]} ({m['count']}) · {m['id']}") for m in state["sessions"]]
@@ -177,7 +196,7 @@ class ChatWindow(QMainWindow):
         self.materials_summary.setVisible(summary is not None)
         if summary is None:
             return
-        sources = {"read": "已读", "truncated": "截断", "failed": "失败", "interrupted": "中断"}
+        sources = {"read": "已读", "truncated": "截断", "failed": "失败", "interrupted": "中断", "empty": "无可用正文"}
         artifacts = {"written": "已写入，待回读", "verified": "已回读核对",
                      "readback_failed": "回读未通过", "write_unverified": "写入未核实"}
         lines = [f"{s['id']} {sources[s['status']]} · {s['target'][:130]}"

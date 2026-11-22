@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from html import escape
 from pathlib import Path, PureWindowsPath
 
 from likecc.agent import ToolResultEvent, ToolUseEvent
@@ -63,12 +62,14 @@ class MaterialsWorkflow:
         self.documents = WorkspaceDocuments(work_dir)
         self.rules = rules
         self.cache = FileStateCache(read_text=self.documents.read_text)
+        self.on_change = None
         self.begin("")
 
     def begin(self, prompt):
         self.urls = explicit_urls(prompt)
         self.sources = {}
         self.artifacts = {}
+        self.write_intents = {}
         self._calls = {}
         self.cache.clear()
 
@@ -86,7 +87,12 @@ class MaterialsWorkflow:
             return previous
         source = {"id": identifier, "kind": kind, "target": target, "status": status, **metadata}
         self.sources[key] = source
+        self.checkpoint()
         return source
+
+    def checkpoint(self):
+        if self.on_change is not None:
+            self.on_change()
 
     def observe(self, event):
         if isinstance(event, ToolUseEvent) and event.tool_name in {"FetchWebPage", "ReadFile"}:
@@ -125,6 +131,7 @@ class MaterialsWorkflow:
                 except ValueError:
                     break
         self._calls.clear()
+        self.checkpoint()
 
     def summary(self):
         return {
@@ -133,22 +140,26 @@ class MaterialsWorkflow:
         }
 
     def ledger(self):
-        def plain(text):
-            return escape(" ".join(text.split())).replace("`", "&#96;")
+        def code(text):
+            # Entities are literal inside CommonMark code spans. Preserve
+            # ampersands and repeated spaces; choose a safe backtick delimiter.
+            fence = "`" * (1 + max((len(s) for s in re.findall(r"`+", text)), default=0))
+            pad = " " if text.startswith(("`", " ")) or text.endswith(("`", " ")) else ""
+            return fence + pad + text + pad + fence
 
         rows = []
         for source in self.sources.values():
             if source["status"] == "pending":
                 continue
-            target = plain(source["target"])
-            final = plain(source.get("final_url", ""))
-            title = plain(source.get("title", ""))
-            detail = f" · 最终 URL `{final}`" if final and final != target else ""
+            target = source["target"]
+            final = source.get("final_url", "")
+            title = source.get("title", "")
+            detail = f" · 最终 URL {code(final)}" if final and final != target else ""
             if title:
-                detail += f" · `{title}`"
+                detail += f" · {code(title)}"
             if source.get("time"):
                 detail += f" · {source['time']}"
-            rows.append(f"- {source['id']} · {source['status']} · `{target}`{detail}")
+            rows.append(f"- {source['id']} · {source['status']} · {code(target)}{detail}")
         return "\n".join(rows) or "- 本次没有已记录的读取结果。"
 
 
@@ -179,6 +190,7 @@ class MaterialRead(ReadFile):
         if result.is_error:
             if artifact is not None:
                 artifact["status"] = "readback_failed"
+                workflow.checkpoint()
             else:
                 workflow.record("file", local, "failed", time=FetchWebPage._time())
             return result
@@ -190,8 +202,10 @@ class MaterialRead(ReadFile):
         if artifact is not None:
             if digest(actual) != artifact["digest"]:
                 artifact["status"] = "readback_failed"
+                workflow.checkpoint()
                 return ToolResult(f"回读与本次写入不一致：{local}", True)
             artifact["status"] = "verified"
+            workflow.checkpoint()
             return ToolResult(f"成果已回读核对（全文摘要一致）：{local}\n{body}")
         source = workflow.record("file", local, "truncated" if truncated else "read", time=FetchWebPage._time())
         return ToolResult(f"{source['id']} | {source['status']} | {local}\n资料正文：\n{body}")
@@ -221,12 +235,19 @@ class MaterialWrite(WriteFile):
                 raise ValueError("Markdown 成果超过 128 KiB")
         except (ValueError, RuntimeError, OSError) as exc:
             return ToolResult(str(exc), True)
+        # Persist a conservative clue BEFORE a write can have side effects.
+        workflow.write_intents[local] = {"status": "write_unverified", "digest": digest(text)}
         if local in workflow.artifacts:
             workflow.artifacts[local]["status"] = "write_unverified"
+        workflow.checkpoint()
         result = await super().execute(params.model_copy(update={"file_path": str(path), "content": text}))
         if result.is_error:
+            workflow.write_intents[local]["status"] = "write_failed"
+            workflow.checkpoint()
             return result
+        workflow.write_intents[local]["status"] = "written"
         workflow.artifacts[local] = {"status": "written", "digest": digest(text)}
+        workflow.checkpoint()
         workflow.cache.forget(str(path))
         return ToolResult(f"已写入 {local}；请用 ReadFile 回读核对成果。")
 

@@ -31,6 +31,25 @@ _PATH_FIELDS: dict[str, str] = {
 }
 
 
+def normalize_web_rule(value: str) -> str:
+    """URL glob: scheme/DNS host case-insensitive, rest case-sensitive.
+
+    Only * is a URL wildcard; ? (query separator) and brackets are literal.
+    Only the authority is normalized; paths, escapes and queries stay intact.
+    File rules deliberately retain their historical platform semantics.
+    """
+    match = re.match(r"^([^:/]+)://([^/?#]+)(.*)$", value, re.DOTALL)
+    if match is None:
+        return value
+    scheme, authority, tail = match.groups()
+    host, colon, port = authority.rpartition(":")
+    if not colon or not port.isdecimal():
+        host, colon, port = authority, "", ""
+    host = host.rstrip(".").lower()
+    host = ".".join(label.encode("idna").decode("ascii") for label in host.split("."))
+    return f"{scheme.lower()}://{host}{colon}{port}{tail}"
+
+
 @dataclass(frozen=True)
 class Rule:
     tool_name: str
@@ -41,6 +60,9 @@ class Rule:
     def matches(self, tool_name: str, content: str) -> bool:
         if self.tool_name != tool_name:
             return False
+        if tool_name == "FetchWebPage":
+            pattern = re.escape(normalize_web_rule(self.pattern)).replace(r"\*", ".*")
+            return re.fullmatch(pattern, normalize_web_rule(content), re.DOTALL) is not None
         return fnmatch(content, self.pattern)
 
 
