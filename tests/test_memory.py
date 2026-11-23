@@ -228,6 +228,7 @@ class TestSessionManager:
         removed = mgr.cleanup(max_age_days=30)
         assert removed == 1
         assert len(mgr.list()) == 0
+        assert not (tmp_path / ".likecc/memories.sqlite3").exists()
 
     def test_create_generates_valid_id(self, tmp_path: Path) -> None:
         mgr = SessionManager(str(tmp_path))

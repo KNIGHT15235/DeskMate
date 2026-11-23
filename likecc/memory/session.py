@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
+import sqlite3
 import string
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -14,6 +16,7 @@ from likecc.conversation import ConversationManager, Message, ToolResultBlock, T
 SESSIONS_DIR = ".likecc/sessions"
 DEFAULT_MAX_AGE_DAYS = 30
 TITLE_MAX_LENGTH = 50
+log = logging.getLogger(__name__)
 
 SESSION_SUMMARY_PROMPT = (
     "你是一个对话摘要助手。请根据下面的对话内容，用一句话总结这个会话的主要内容。"
@@ -38,6 +41,9 @@ class RecordType(str, Enum):
     # 使 resume 可以仅凭此标记重建压缩后的状态，无需重放标记之前的原始前缀。
     COMPACT_BOUNDARY = "compact_boundary"
     RUN_STATE = "run_state"  # audit only; never becomes a model message
+    MEMORY_ACTION = "memory_action"  # explicit local user decisions; audit only
+    RUN_EVIDENCE = "run_evidence"  # run-qualified material provenance; audit only
+    MEMORY_RECALL = "memory_recall"  # audit only; never restored as model context
 
 
 @dataclass
@@ -495,6 +501,7 @@ def _generate_session_id() -> str:
 
 class SessionManager:
     def __init__(self, work_dir: str) -> None:
+        self._work_dir = Path(work_dir).resolve()
         self._sessions_dir = Path(work_dir) / SESSIONS_DIR
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
 
@@ -589,12 +596,20 @@ class SessionManager:
         return deleted
 
     def cleanup(self, max_age_days: int = DEFAULT_MAX_AGE_DAYS) -> int:
+        from .workspace import referenced_session_ids
+
+        try:
+            protected = referenced_session_ids(self._work_dir)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            # An unreadable/corrupt/foreign reference index cannot authorize deletion.
+            log.warning("Skipping session cleanup: memory references unavailable (%s)", type(exc).__name__)
+            return 0
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         removed = 0
 
         for meta_path in list(self._sessions_dir.glob("*.meta")):
             meta = SessionMeta.load(meta_path)
-            if meta is not None and meta.last_active < cutoff:
+            if meta is not None and meta.id not in protected and meta.last_active < cutoff:
                 self.delete(meta.id)
                 removed += 1
 

@@ -189,7 +189,7 @@ def test_close_during_scheduled_permission_recovers_without_model_replay(desktop
     command(reopened, "schedule_scan")
     assert sum(client.calls for client in clients) == calls
     assert not command(reopened, "schedule_retry", execution_id=row["id"])["accepted"]
-    assert command(reopened, "schedule_retry", execution_id=row["id"], reviewed=True)["accepted"]
+    assert command(reopened, "schedule_retry", execution_id=row["id"], reviewed_execution_id=row["id"])["accepted"]
     assert len(reopened.snapshot()["executions"]) == 2
 
 

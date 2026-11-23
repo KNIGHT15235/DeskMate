@@ -47,9 +47,10 @@ class DesktopOptions:
 
 
 class DesktopController:
-    def __init__(self, options: DesktopOptions, *, runtime_factory=Runtime, clock=utc_now):
+    def __init__(self, options: DesktopOptions, *, runtime_factory=Runtime, clock=utc_now, config_loader=None):
         self._options = options
         self._runtime_factory = runtime_factory
+        self._config_loader = config_loader or load_config
         self._clock = clock
         self._lock = threading.Lock()
         self._receipts = {}
@@ -57,7 +58,9 @@ class DesktopController:
                       "rows": [], "pending": [], "sessions": [], "notice": "",
                       "command": None, "demo": options.demo, "workspace": "", "provider": "",
                       "worker_thread": None, "materials": None, "tasks": [], "executions": [],
-                      "schedule_draft": None, "scheduled_execution": None, "scheduler_error": ""}
+                      "schedule_draft": None, "scheduled_execution": None, "scheduler_error": "",
+                      "memories": [], "memory_details": None, "memory_proposal": None,
+                      "recalled_memories": [], "memory_source_available": False}
         self._loop = None
         self._close_requested = threading.Event()
         self._shutdown_error = None
@@ -249,7 +252,8 @@ class DesktopController:
 
     async def _open(self, options):
         self._set(state="starting", pending=[], workspace="", provider="", session_id="", sessions=[], run_id="", materials=None,
-                  tasks=[], executions=[], schedule_draft=None, scheduler_error="")
+                  tasks=[], executions=[], schedule_draft=None, scheduler_error="", memories=[],
+                  memory_details=None, memory_proposal=None, recalled_memories=[], memory_source_available=False)
         self._schedule_draft = None
         released = False
         try:
@@ -269,7 +273,7 @@ class DesktopController:
                 workspace, user_home = Path(options.work_dir).expanduser().resolve(), None
                 if not workspace.is_dir():
                     raise ValueError(f"工作区不存在：{workspace}")
-                config = load_config(work_dir=workspace)
+                config = self._config_loader(work_dir=workspace)
                 provider = next((p for p in config.providers if p.name == options.provider), None) if options.provider else config.providers[0]
                 if provider is None:
                     raise ValueError(f"Provider 未找到：{options.provider}")
@@ -292,11 +296,11 @@ class DesktopController:
             for name in ("ExitPlanMode", "EnterPlanMode", "SyntheticOutput"):
                 self._runtime.registry.disable(name)
             self._service = SessionService(self._runtime, persistent=True,
-                memory=options.memory and not options.demo, summaries=options.summaries and not options.demo,
-                affairs=self._affairs)
+                workspace_memory=True, summaries=options.summaries and not options.demo, affairs=self._affairs)
             self._store = ScheduleStore(workspace, clock=self._clock)
             self._options = options
             self._sessions()
+            self._memory_view()
             # Publish readiness together with restored history. File I/O can
             # release the GIL, so publishing idle first exposes a partial view.
             self._set(state="idle", rows=[], pending=[], run_id="", notice="",
@@ -349,6 +353,10 @@ class DesktopController:
                 self._set(pending=[], state="running")
             elif command.startswith("schedule_"):
                 await self._schedule_command(command, data)
+            elif command.startswith("memory_"):
+                if state != "idle" or self._service is None:
+                    raise RuntimeError("请等待当前运行结束后管理记忆")
+                self._memory_command(command, data)
             elif command in {"send", "new", "resume", "open", "demo"}:
                 if state not in {"idle", "error"}:
                     raise RuntimeError("运行或启动期间不能提交、切换会话/工作区/Provider")
@@ -364,6 +372,16 @@ class DesktopController:
                         prompt = data["text"].strip()
                         if not prompt:
                             raise ValueError("输入不能为空")
+                        remember = re.match(r"^(?:请记住|记住)[，,:：\s]*(.+)$", prompt, re.S)
+                        if remember:
+                            row = self._service.propose_memory(remember[1], quote=prompt)
+                            self._set(memory_proposal=row["id"])
+                            self._memory_view()
+                            self._sessions()
+                            self._row("user", prompt)
+                            self._row("status", "请在工作区记忆窗口核对类型、内容和来源，然后确认保存。")
+                            self._ack(command_id, True, "已生成待确认记忆，尚未参与召回")
+                            return
                         if re.search(r"每周|明天.*提醒|明晚.*提醒|\d{4}-\d{2}-\d{2}.*提醒", prompt):
                             self._prepare_schedule(parse_schedule(prompt, now=self._clock()))
                             self._ack(command_id, True, "已解析安排，请核对时间、时区、范围后确认保存")
@@ -389,6 +407,7 @@ class DesktopController:
                                 for result in m.tool_results:
                                     self._row("tool_error" if result.is_error else "result", result.content, tool_id=result.tool_use_id)
                         self._sessions()
+                        self._memory_view()
             else:
                 raise ValueError(f"未知命令：{command}")
         except Exception as exc:
@@ -398,6 +417,30 @@ class DesktopController:
     def _sessions(self):
         self._set(sessions=[{"id": m.id, "title": m.title or "未命名", "count": m.message_count}
                             for m in self._service.session_manager.list()[:100]])
+
+    def _memory_view(self):
+        store = self._service.workspace_memory
+        if store is not None and store.db is None:
+            return  # a closing consumer must not query an already closed SQLite handle
+        self._set(memories=store.list() if store else [],
+            memory_source_available=bool(self._service.last_source_id),
+            recalled_memories=deepcopy(self._service.recalled_memories))
+
+    def _memory_command(self, command, data):
+        service = self._service
+        if command == "memory_propose":
+            row = service.propose_memory(data["content"], data["kind"], from_run=data.get("from_run", False))
+            self._set(memory_proposal=row["id"])
+            self._sessions()
+        elif command == "memory_view":
+            self._set(memory_details=service.workspace_memory.details(data["memory_id"]))
+        elif command in {"memory_confirm", "memory_update", "memory_delete"}:
+            values = {k: data[k] for k in ("kind", "content") if k in data}
+            service.change_memory(data["memory_id"], data["revision"], command.removeprefix("memory_"), **values)
+            self._set(memory_details=None, memory_proposal=None)
+        else:
+            raise ValueError("未知记忆命令")
+        self._memory_view()
 
     def _provider_identity(self):
         p = self._runtime.provider
@@ -447,7 +490,7 @@ class DesktopController:
         elif command == "schedule_allow_model":
             self._store.approve_model(data["execution_id"])
         elif command == "schedule_retry":
-            if data.get("reviewed") is not True:
+            if not data.get("execution_id") or data.get("reviewed_execution_id") != data["execution_id"]:
                 raise ValueError("请先核对旧次会话、成果和磁盘状态")
             self._store.retry(data["execution_id"])
         elif command == "schedule_scan":
@@ -501,8 +544,8 @@ class DesktopController:
         self._execution_id = row["id"]
         self._scheduled_cancel_requested = False
         current = self.snapshot()
-        self._foreground_view = {k: current.get(k) for k in ("rows", "session_id", "run_id", "materials", "notice", "last_status")}
-        self._set(state="running", rows=[], pending=[], scheduled_execution=row["id"],
+        self._foreground_view = {k: current.get(k) for k in ("rows", "session_id", "run_id", "materials", "notice", "last_status", "recalled_memories")}
+        self._set(state="running", rows=[], pending=[], recalled_memories=[], scheduled_execution=row["id"],
             notice="正在处理定时资料任务；结束后恢复原聊天，草稿保留。")
         try:
             # A fresh Runtime keeps foreground conversation/context fully intact.
@@ -525,7 +568,8 @@ class DesktopController:
                 await runtime.aclose()
                 self._restore_foreground()
                 return
-            self._scheduled_service = SessionService(runtime, persistent=True, affairs=self._scheduled_affairs)
+            self._scheduled_service = SessionService(runtime, persistent=True, affairs=self._scheduled_affairs,
+                workspace_memory=False, memory=False)
             self._evidence_errors = []
             self._scheduled_affairs.on_change = self._save_evidence
             prompt = (spec["content"] + "\n本次已确认范围（不能从网页或模型回答扩大）：\n" +
@@ -614,6 +658,7 @@ class DesktopController:
                 self._set(pending=[], state="closing" if self._closing else "idle")
                 self._run = None
                 self._sessions()
+                self._memory_view()
 
     def _event(self, event):
         if event["run_id"] != self.snapshot()["run_id"] or event["session_id"] != self.snapshot()["session_id"]:
@@ -629,7 +674,9 @@ class DesktopController:
             if kind in {"PermissionRequest", "UserInputRequest", "ToolResultEvent", "LoopComplete", "ErrorEvent"}:
                 self._save_evidence()
                 self._schedule_view()
-        if kind == "StreamText":
+        if kind == "MemoryRecall":
+            self._set(recalled_memories=data["memories"])
+        elif kind == "StreamText":
             self._text(data["text"])
         elif kind in {"PermissionRequest", "UserInputRequest"}:
             if kind == "UserInputRequest" and any(q.get("type") not in SUPPORTED_QUESTIONS for q in data["questions"]):

@@ -138,6 +138,11 @@ class HookEvent:
     success: bool
 
 
+@dataclass
+class MemoryRecall:
+    memories: list[dict]
+
+
 AgentEvent = (
     StreamText
     | ThinkingText
@@ -152,6 +157,7 @@ AgentEvent = (
     | UserInputRequest
     | CompactNotification
     | HookEvent
+    | MemoryRecall
 )
 
 
@@ -326,6 +332,7 @@ class Agent:
         self.total_output_tokens = 0
         self.instructions_content = instructions_content
         self.memory_manager = memory_manager
+        self.request_memory = ""  # request-only desktop data; never compacted or persisted as history
         self.hook_engine = hook_engine
         self.query_source = query_source
         self.system_prompt_override = system_prompt_override
@@ -355,6 +362,7 @@ class Agent:
         self.recovery_state = RecoveryState()
         self._current_conversation = None
         self._last_system_prompt = None
+        self.request_memory = ""
         self._loop_count = 0
         self.total_input_tokens = self.total_output_tokens = 0
         self.clear_active_skills()
@@ -591,6 +599,13 @@ class Agent:
             )
             if _new_records:
                 append_replacement_records(self.session_dir, _new_records)
+
+            # Attach only to the outbound copy. The original conversation is
+            # the input to compaction, recovery and session persistence, so a
+            # deleted memory cannot return through those generated caches.
+            if self.request_memory:
+                api_conv.add_system_reminder(self.request_memory)
+                api_conv.history[-1].transient = True
 
             collector = StreamCollector()
             llm_stream = self.client.stream(api_conv, system=system, tools=tools)

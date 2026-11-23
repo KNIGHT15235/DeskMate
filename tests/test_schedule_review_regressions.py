@@ -197,8 +197,8 @@ def test_write_io_failure_is_reviewed_before_next_cycle(desktop, monkeypatch, tm
     assert command(reopened, "schedule_scan")["accepted"]
     assert sum(client.calls for client in clients) == calls
     assert len(writes) == 1 and (output.read_bytes(), output.stat().st_mtime_ns) == before
-    assert command(reopened, "schedule_retry", execution_id=row["id"], reviewed=True)["accepted"]
-    assert command(reopened, "schedule_retry", execution_id=row["id"], reviewed=True)["accepted"]
+    assert command(reopened, "schedule_retry", execution_id=row["id"], reviewed_execution_id=row["id"])["accepted"]
+    assert command(reopened, "schedule_retry", execution_id=row["id"], reviewed_execution_id=row["id"])["accepted"]
     attempts = [r for r in reopened.snapshot()["executions"] if r["retry_of"] == row["id"]]
     assert len(attempts) == 1 and attempts[0]["status"] == "awaiting_model"
     assert sum(client.calls for client in clients) == calls

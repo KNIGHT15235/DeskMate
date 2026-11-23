@@ -243,10 +243,10 @@ class DesktopApplication(QObject):
         self.deleteLater()
 
 
-def launch(options):
+def launch(options, *, controller_factory=None):
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("DeskMate")
-    controller = DesktopController(options)
+    controller = (controller_factory or DesktopController)(options)
     lifecycle = None
     previous = {}
     try:

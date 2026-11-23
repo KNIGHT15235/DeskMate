@@ -1543,3 +1543,211 @@ python -s -X utf8 -m pytest -q -ra -p no:cacheprovider --basetemp=<全新临时�
 结论：本次审查的两项 P1 和一项 P2 均已修复，定向回归、相关边界及双平台完整离线回归通过；未发现这三项仍阻塞提交的问题。修改保留在独立副本工作区，实际提交与推送另行进行。
 
 本轮未重新进行可见桌面或真实 Provider 验收，原真实拒绝写入缺口仍保留。一次性/每周、Asia/Shanghai/UTC、本地单调度器、禁止 Windows/WSL 同库并发，以及未知写入不承诺无损恢复或自动重放的限制保持。不暂存、不提交、不推送，不启动 R6。
+
+<a id="r6-独立仓库长期记忆2026-11-2223"></a>
+
+## R6 独立仓库长期记忆（2026-11-22—23）
+
+### 范围与基线
+
+仅操作 `D:\ldj\03\DeskMate-Standalone`，分支 `main`，开始时 HEAD 精确为 `6ea15eed1d6396912abc3a102b87f13963510015`，工作区干净；未发现适用 AGENTS.md。Git 所有权提示用每条命令的 `-c safe.directory=D:/ldj/03/DeskMate-Standalone` 处理，没有修改全局配置。原 DeskMate 仓库未读写；没有暂存、提交、推送、真实 Provider 调用，也没有启动 R7。测试内部的临时 Git 仓库由原离线测试自行创建，不涉及主仓库提交。
+
+已阅读目标规格长期记忆目标、desktop/scheduling/service/agent/memory/context 与现有证据。实现保持 SQLite 和 SessionService 技术栈，无依赖/锁文件变更。新增工作区记忆库、管理窗口、请求级召回和离线验收启动器；改动保留在工作区供复审。
+
+### 检查点实测
+
+以下是本轮实际执行，数字是各阶段对应的集合，不能相加当成互不重复的测试总数。
+
+| 检查点 | 实测与报告 |
+| --- | --- |
+| R6-0 修复前 | `r6-0-before.xml`：1 failed，6.48s；真实临时 SQLite + Qt 下 A 勾选后切换 B 的断言失败 |
+| R6-0 修复后 | `r6-0-after-2.xml`：38 passed，19.41s；手动切换、同记录刷新、错误核对 ID、实际点击重试、后续阻塞与待处理计数 |
+| R6-A | `r6-a-02.xml`：37 passed，20.38s；三类记忆、确认/修改/删除、版本冲突、来源与工作区隔离、恢复不重存/重执行 |
+| R6-B | `r6-b-02.xml`：130 passed，18.97s；中文/无关检索、实际 client 输入、重启更新删除、压缩及旧 CLI/TUI 兼容 |
+| R6-C | `r6-c-04.xml`：13 passed，54.82s；完整正常 Qt 流程及启动/核对相关集。`r6-c-fixture-01.xml`：2 passed，34.92s，覆盖最终可见启动器与合成核对样例 |
+| R6 汇总专项 | `r6-all-01.xml`：15 passed，41.95s；当时所有新增 R6 用例。其后补齐的权限/长度集 `r6-b-bounds.xml`：14 passed，8.49s |
+| 首轮全套 | WSL `r6-full-wsl-01.xml`：918 passed，145.50s；Windows `r6-full-win-01.xml`：912 passed、6 skipped，267.68s |
+
+所有报告位于独立仓库忽略目录 `.r1-verification/`。完整流程用 `examples.deskmate_memories` 的 fake client、正常 ChatWindow/MemoryWindow/ScheduleWindow、真实 SQLite 和 Session JSONL；网络 guard 拒绝外部 socket，允许 Windows asyncio 自用的内部 loopback socketpair。测试数据库按平台隔离，不共写。
+
+完整流程从 A 用户明确要求记忆开始，确认并看来源；关闭重开后新会话实收旧偏好、无关请求不召回；更正后只注入新版本；在 A 仍有已确认偏好时检查 B 和原定时任务，避免用空库做无效的隔离验证；删除后独立新请求无该记忆。两次资料运行在同一会话内都产生 S1，来源分别指向 source-a.md/outputs/a.md 与 source-b.md/outputs/b.md，run_id/key 不同，成果均来自真实 ReadFile 回读，恢复不重做工具。
+
+R6-B 另将旧 Markdown load/extract 和额外 client 创建替换为一旦调用即失败的桩，跨过旧五次提取间隔；真实触发压缩，核验摘要 client 输入和 compact_boundary 不含召回标记。定时对照既检查上下文没有个人记忆，也故意请求范围外读取/写入并验证被拒绝；前台记住输出位置后仍弹出写入卡片，拒绝时文件不存在。
+
+### 环境与复现
+
+Windows 使用 `C:\Users\28436\.conda\envs\deskmate-win\python.exe`，Python 3.12.7 / SQLite 3.54.1 / PySide6 6.8.3；WSL Ubuntu-24.04 使用 `/home/ldj/anaconda3/envs/cc/bin/python`，Python 3.11.16 / SQLite 3.53.4 / PySide6 6.8.3。支持检查断言 likecc 实际导入路径位于本独立仓库。
+
+完整回归沿用上轮的隔离 CWD 策略：把公开 README.md 与 pyproject.toml 复制到临时 CWD，PYTHONPATH 指向独立仓库；pytest 显式指定配置、rootdir 和 tests，避免原 CLI debug.log 写入源码根目录及 CWD 依赖影响。Windows 测试数据位于 `.r1-verification/r6-*`，WSL 测试数据位于独立 `/tmp/deskmate-r6-*`，每轮使用全新 basetemp。
+
+```powershell
+$env:QT_QPA_PLATFORM='offscreen'
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONUTF8='1'
+$env:PYTHONPATH='D:/ldj/03/DeskMate-Standalone'
+# 在已准备好 README.md/pyproject.toml 的临时 CWD 执行；basetemp 每次换新
+& C:/Users/28436/.conda/envs/deskmate-win/python.exe -s -X utf8 -m pytest -q -ra -p no:cacheprovider -c D:/ldj/03/DeskMate-Standalone/pyproject.toml --rootdir=D:/ldj/03/DeskMate-Standalone D:/ldj/03/DeskMate-Standalone/tests --basetemp=<全新临时路径> --junitxml=<报告路径>
+```
+
+```bash
+QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 \
+PYTHONPATH=/mnt/d/ldj/03/DeskMate-Standalone \
+/home/ldj/anaconda3/envs/cc/bin/python -m pytest -q -ra -p no:cacheprovider \
+  -c /mnt/d/ldj/03/DeskMate-Standalone/pyproject.toml \
+  --rootdir=/mnt/d/ldj/03/DeskMate-Standalone \
+  /mnt/d/ldj/03/DeskMate-Standalone/tests --basetemp=<全新临时路径> --junitxml=<报告路径>
+```
+
+过程问题如实保留：最初 basetemp 父目录未创建，补齐后才取得修复前失败证据；R6-0 初次修后测试种子缺失 Provider 指纹，修正为通过正常安排入口创建种子后 38 项通过。R6-A 测试在 UI 版本未刷新时点击旧版本删除，后端正确拒绝；改为等待新版本展示。R6-B 两项初次失败是 fake Runtime 构造缺少 permission_mode，补齐后通过。R6-C 的脚本曾误把 deferred-tool 提示当成用户请求，已修正；完整多步运行的等待改为有界 20 秒，未删除状态/成果断言。来源面板轮询重置阅读位置的问题随后修正，已增加光标保持断言。
+
+WSL 在沙箱内最初返回 E_ACCESSDENIED，通过获准本机执行通道运行；一轮最终测试启动时原 `/tmp` CWD 不存在，还未执行 pytest，重新创建独立临时目录后继续。Windows 第二轮全套出现一次既有 Worktree 测试的 `git worktree add` 失败，日志仅含 Preparing worktree；没有修改 Worktree 生产代码或放宽旧断言，后续专项及最终结果另列。
+
+### 历史证据、跳过与未验收
+
+本轮没有把 R5 的 WSL 903 / Windows 897+6、真实 DeepSeek、Windows 提醒/托盘/显示器结果当作新测试。它们仍作为前节历史证据保留。R4 真实 HTTP 流内取消、实网重定向边界也没有因本轮离线通过而扩大。
+
+Windows 平台跳过仍为五项 POSIX 进程组契约与一项缺少合适系统文件的符号链接用例；没有为 R6 新增跳过。WSL 的对应平台用例实际执行。SubAgent 日志中的 `failed: boom` 是既有异常测试的预期注入，判断依据是 90/90 汇总和退出码。
+
+R6 Windows 可见桌面离线人工点击已于 2026-11-23 补齐，七项结果见后节。仍未进行真实 Provider 记忆质量/拒绝写入、跨平台同库并发、跨设备同步、语义检索准确率或大规模性能验收。R5 真实 Provider 拒绝写入仍是用户跳过的已知缺口。仅验证本地词法检索、明确保存、权限边界及真实本地存储；不宣称删除历史中的所有文字、不替用户授予默认写入权限。主动通知、稍后提醒和继续处理均留在 R7。
+
+可见验收入口与一次走完的七项清单见 [R6 使用说明](deskmate-memory.md#一次走完的可见桌面人工验收)。启动器会打印新的 A/B 工作区，支持同一根目录退出重开；`--review-fixture` 的 A/B 故障记录明确标为合成历史，其后的 retry 才是真实离线运行。实现定稿阶段只准备和自动化验证；后续人工结果以用户逐项反馈和只读审计为依据。
+
+### 定稿结果
+
+最后的来源窗口阅读位置修正后，两平台重新执行全套，以下为定稿数字；比起点 903 cases 新增 18 项。没有用失败运行或中途数字替代最终结果。
+
+| 定稿验证 | 本轮实际结果 | 证据（`.r1-verification/`） |
+| --- | --- | --- |
+| WSL cc 完整离线回归 | **921 passed，0 skipped，199.73s，退出 0** | `r6-final-wsl-03.xml/log` |
+| Windows deskmate-win 完整离线回归 | **915 passed、6 skipped，281.05s，退出 0** | `r6-final-win-03.xml/log` |
+| Worktree + 来源窗口专项 | 61 passed，60.43s；先前单次 Git 失败未复现，原因未确定 | `r6-ui-worktree.xml`；失败原报告保留为 `r6-full-win-final.xml/log`（914 passed、6 skipped、1 failed） |
+| SubAgent | 双平台各 **90/90**，退出 0 | `r6-win-subagent.log`、`r6-wsl-subagent.log` |
+| AST / 内存编译 | 双平台各 **200 个 Python 文件**通过，最终源码哈希逐项一致，不生成 pyc | `r6-compile-win.json`、`r6-compile-wsl.json` |
+| CLI / desktop 入口帮助 | 双平台共四次退出 0 | `r6-{win,wsl}-{cli-help,desktop-help}.log` |
+| 离线可见启动器帮助 / 准备 | 双平台帮助及 `--check --review-fixture` 均退出 0；该项仅准备，后续人工见下节 | `r6-{win,wsl}-memory-demo-{help,prepare}.log` |
+| Git 与新增文件空白检查 | `git diff --check` 与九个新增文件空白检查通过；暂存区为空 | 最终只读复核；HEAD 仍为原 `6ea15eed…`，分支 main |
+
+额外重跑只由后续样例/边界补齐、来源窗口修正和一次 Git 失败触发。曾完成的中间 WSL `r6-full-wsl-final.xml/log` 为 921 passed / 218.18s；最终以上表第三轮定稿快照为准。所有要求的离线检查现已完成，不需要再调用真实 Provider 才能复审这轮代码。
+
+后续七项可见桌面离线人工清单已完成；“离线自动化”“用户可见操作”和“真实模型未验收”分别记录。独立仓库改动未暂存、未提交、未推送，原仓库未操作，R7 不在本轮实现范围。
+
+## R6 七项离线人工验收（2026-11-23）
+
+用户在原生 Windows `deskmate-win` 中通过正常桌面入口逐项操作并反馈“正确”，补充了执行结果与切回工作区后的两张截图。验收启动器为 `examples.deskmate_memories --review-fixture`，后续使用同一 `--root` 重开；临时根目录名为 `deskmate-r6-tw_z_l5c`，A/B 使用各自真实 SQLite、会话与文件，Provider 始终为 `offline-r6 / fake`。没有真实 Provider 或费用请求，Codex 没有代点控件；可见结果来自用户，持久状态由只读核查补强。
+
+| 编号 | 用户确认的可见行为 | 本次只读证据与结论 |
+| --- | --- | --- |
+| 1 执行记录核对与重试 | A 勾选后切 B 清空，刷新不能沿用；B 明确核对后可以重试，成果回读，旧历史保留且待处理归零；取消未来周期 | 合成样例的旧 B 保持 interrupted 且 reviewed_at 非空；新尝试 completed，retry_of 指向 B，`outputs/review-summary.md` 为 verified 且实际摘要一致。四条历史保留，安排 enabled=0/next_due=null。通过 |
+| 2 保存、确认与来源 | 普通聊天不自动保存；“请记住”先待确认，查看来源后确认；关闭再打开仍在 | 一条 preference，稳定 ID `515285451d164a3fa59c617131dd7aff`，确认后 revision 2，来源为原会话 `session_20261123_154939_rlkf`。通过 |
+| 3 重启相关召回与无关请求 | 完全退出重开，独立新会话整理周报可见偏好；另开会话问月球故事不召回 | `model-inputs.jsonl` 第 6 行含原偏好及来源，命中词“周报”；第 7 行无记忆注入，整个输入不含该偏好。通过 |
+| 4 工作区隔离与定时范围 | A 保存每周周报安排；B 相同请求无记忆，记忆/安排列表为空；回 A 显式核对重试后允许模型和写入，完成并取消安排 | 第 8 行来自 B，无个人偏好。定时执行第 9–12 行均无个人偏好，确认范围始终为 `project_notes.md`、无 URL、`outputs/weekly-summary.md`。实际资料 S1 与成果 verified 对应，文本摘要一致；旧中断已核对、新尝试 completed，两条历史保留且安排停用。通过，恢复体验限制另记 |
+| 5 更正与删除生效 | 保存新顺序，新会话只用新顺序；删除后再开会话不召回 | 第 13 行为同 ID revision 3，“行动项、依据、结论”，整个输入无原顺序；第 14 行无记忆注入，整个输入无两版内容。有效集合删除该条，confirm/update/delete 审计保留。通过 |
+| 6 两次资料运行的 S1 溯源 | 同一会话中保存两条事务关联，来回选择来源不串联 | 两条均 confirmed/revision 2；source-a.md/outputs/a.md 与 source-b.md/outputs/b.md 分别对应独立 run_id，均有真实 verified 及匹配的成果摘要。相同局部 S1 的完整 key 不同。通过 |
+| 7 恢复、持久性与界面 | 恢复来源与原偏好会话不重跑/不复活记忆；退出重开保留两条关联和六条执行历史；当前桌面的底部按钮可达，来源可滚动选择复制且刷新不抢位置 | 恢复前后日志均 27 行、整体 SHA-256 不变；记忆 ID/内容/版本/来源保持，memory_changes 均 5 条；四个成果的文本摘要与 mtime 均不变。两项安排停用，待处理按持久状态计算为 0；B 仍无记忆与安排。通过；界面可用性以用户当前显示配置为限 |
+
+事务来源会话为 `session_20261123_162037_gigb`。事务一运行 `22a46443ce66436aaa8eddfa709cf03e` 的来源 key 为该会话/运行/S1，指向 `source-a.md`；事务二运行 `c2b755a48e234fcf8e2c61c3aad4c27f` 的 S1 指向 `source-b.md`。第二条另保留已有成果读取的 S2，未改变 S1 的归属。`verified` 来自工具证据，并以实际文件摘要复核，不是模型自称。
+
+恢复与重启比较的模型日志 SHA-256 为 `3e3317bab6abbb5c9515129c0c158c5f81b88a915792113f5f7cc098e130ce98`。最终对照快照保存在忽略目录 `.r1-verification/r6-manual-final-audit.json`，只包含本次离线样例、证据标识及比较结果。27 行是 fake client 调用快照，包含工具迭代和人工任务运行，不等于 27 个独立用户任务或计费请求。
+
+### 本次观察到的恢复体验限制
+
+切回 A 时，16:02 到期的执行变为“已中断，待核对”，而非前一步指导预计的“待确认模型调用”。截图、持久记录和源码一致：重新创建 ScheduleStore 会把 queued/awaiting_model/running/waiting 一并恢复为 interrupted，包括尚未开始的记录。该次 started_at/session_id/run_id 均为空，日志仍停留在第 8 行，目标成果不存在；未发生自动模型调用或写入。
+
+用户随后核对该条，明确发起新尝试、允许模型与写入，成功回读后取消安排。这条记录作为当前保守恢复策略和文案体验限制保留，本次没有修改或宣称修复；它没有导致记忆扩大授权。后续若区分“尚待确认”和“可能已有副作用”的恢复状态，需要针对调度状态机补回归。
+
+### 收尾与覆盖边界
+
+本次收尾只补充文档、只读对照证据和差异检查，没有改生产代码或重跑 pytest/SubAgent/编译；前节双平台定稿数字沿用其原执行记录。七项离线人工验收完成，R6 可以进入代码复审，再推进 R7。真实 Provider 记忆质量、R5 用户跳过的真实拒绝写入、其他分辨率/缩放组合、WSLg 本轮可见操作、跨平台同库和长期稳定性仍未扩大覆盖；项目事实类型及范围外拒绝等未单独人工操作的行为继续以既有自动化为据。
+
+工作区仍为独立仓库 main / `6ea15eed1d6396912abc3a102b87f13963510015`，保留全部既有改动；没有暂存、提交、推送，未启动 R7。验收临时根目录保留用于复审，两项样例安排已停止未来周期。
+
+## R6 复审两项修复（2026-11-23）
+
+复审核对独立仓库 main / `6ea15eed1d6396912abc3a102b87f13963510015`，保留已有工作区改动。原定向审查为 50 passed；忽略目录的两个补测均失败，分别复现 SQLite 真实读锁导致来源提交失败后串联旧运行，以及 TUI 的 30 天自动清理删掉已确认记忆的原会话。用户随后授权修复这两项，未扩展到 R7 或真实 Provider。
+
+### 实现与正式回归
+
+- `SessionService.start()` 在新运行开始时清除 last_source_id；关联入口还检查来源 kind/session_id/run_id 属于当前会话最后一次运行。真实数据库锁导致来源保存失败后，旧来源不再可用，Qt 按钮禁用且后端拒绝关联；之后成功运行可以重新保存关联。
+- `SessionManager.cleanup()` 先只读查询已有工作区记忆库。当前待确认/已确认记忆引用的来源会话，以及这些记忆的更改审计引用的会话，均跳过自动过期清理。无关会话继续清理，共享来源在最后一条有效引用删除后恢复原有期限。无记忆库时不创建库；损坏、读取错误或归属不符时跳过本次清理并记录诊断，不让 TUI 初始化因可选清理失败而中断。
+- 新增 `tests/test_memory_provenance.py` 六项用例，追加一个真实 Qt/控制器用例；补充既有无记忆库清理用例的兼容断言。总计比原 921 cases 增加 7 项。读取、SQLite 和会话均为真实本地实现，client 为 fake；没有使用用户的人工验收数据。
+
+正式回归先于修复执行：来源/清理六项均按预期失败。新增 Qt 用例首轮在 idle 发布后、记忆快照更新前读取按钮，出现测试同步问题；等待来源快照后，单独复现后端错误接受旧来源关联。原报告 `r6-fix-before.xml`（7 failed、1 passed）及 `r6-fix-ui-before.xml`（1 failed）保留，不把首轮 Qt 同步问题算成额外产品缺陷。修复后的定向集合 `r6-fix-targeted.xml` 为 **93 passed，25.18s**。
+
+### 修复后本轮实测
+
+| 检查 | 结果 | 证据（`.r1-verification/`） |
+| --- | --- | --- |
+| Windows deskmate-win 完整离线回归 | **922 passed、6 skipped，297.65s，退出 0** | `r6-fix-win-full.xml/log` |
+| WSL cc 完整离线回归 | **928 passed、0 skipped，168.25s，退出 0** | `r6-fix-wsl-full.xml/log` |
+| SubAgent | 双平台各 **90/90**，退出 0 | `r6-fix-{win,wsl}-subagent.log` |
+| AST / 内存编译 | 双平台各 **201 个 Python 文件**，源码哈希彼此及当前工作区一致 | `r6-compile-fix-{win,wsl}.json` |
+| CLI / desktop / 离线启动器帮助与样例准备 | 两平台各项均退出 0 | `r6-fix-{win,wsl}-support.json` 及对应日志 |
+| 差异与工作区 | `git diff --check`、新增文件空白检查通过；暂存区为空，分支/HEAD 保持 | 最终只读检查 |
+
+Windows 的六项跳过仍为五项 POSIX 进程组契约及一项缺少合适系统文件的符号链接用例，没有新增跳过。WSL 沙箱调用首次 E_ACCESSDENIED，改用获准本机执行通道后完成；两平台均使用独立临时 CWD/basetemp，保持 fake client 和隔离数据。复现入口为 `.r1-verification/r6_fix_run.py <独立仓库路径> win|wsl`，脚本按平台解释器运行完整回归、SubAgent、帮助和编译，报告保存在独立仓库忽略目录。SubAgent 的 `failed: boom` 是原异常用例的预期注入，汇总和退出码均通过。
+
+两项复审发现均已关闭。主仓库及验收工作区未被替换或重置，修复与原 R6 改动一并留在独立仓库供复审；没有暂存、提交、推送、计费 Provider 请求或 R7 实现。
+
+### 覆盖边界
+
+七项用户可见验收沿用上一节原证据；本次新做的是错误路径、保留期和 Qt offscreen 回归，不冒充用户再次人工点击。修复保护后续自动清理，不重建此前已删除的会话文件；用户明确删除会话不在自动保留机制范围内。SQLite 来源与修改审计自身仍无自动过期策略，跨平台同库并发仍不支持。切回工作区将尚待模型确认记录标为中断的体验限制、R5 真实 Provider 拒绝写入缺口、真实模型质量与其他显示器配置边界均保持。
+
+## R6 提交前独立重验（2026-11-23）
+
+本节是用户授权提交、正常推送和固定版本导出后的新一轮检查，不沿用上一节测试数字。起点仍为独立仓库 `D:\ldj\03\DeskMate-Standalone`、`main`、`6ea15eed1d6396912abc3a102b87f13963510015`，暂存区为空，19 个已修改文件及 10 个新增文件均属于 R6。origin 的获取与推送地址均为 `https://github.com/KNIGHT15235/DeskMate.git`；初次 fetch 后远端 main 与起点一致，无进行中的合并、变基或 cherry-pick。本节记录提交前证据，最终提交 SHA 与远端一致性另由推送报告提供，不能用可变 main 代替固定版本。
+
+### 本次重新执行的检查
+
+| 检查 | 本次结果 | 本地证据（忽略目录 `.r1-verification/`，不随源码提交） |
+| --- | --- | --- |
+| Windows deskmate-win 完整离线回归 | **922 passed、6 skipped，277.49s，退出 0** | `r6-release-win-full.xml/log` |
+| WSL Ubuntu-24.04 / cc 完整离线回归 | **928 passed、0 skipped，160.71s，退出 0** | `r6-release-wsl-full.xml/log` |
+| 独立 SubAgent | 两平台各 **90/90**，退出 0 | `r6-release-{win,wsl}-subagent.log` |
+| AST / 内存编译 | 两平台各 **201 个 Python 文件**通过；逐文件源码哈希一致 | `r6-compile-release-{win,wsl}.json` |
+| CLI、桌面、记忆演示入口帮助 | 两平台各三项均退出 0 | `r6-release-{win,wsl}-support.json` 与对应日志 |
+| 离线样例 `--check --review-fixture` | 两平台准备成功，退出 0；未重复人工点击 | `r6-release-{win,wsl}-memory-demo-prepare.log` |
+| 依赖锁 / Windows 安装依赖 | `uv lock --check --offline` 解析 58 packages；`uv pip check` 检查 61 packages，均退出 0 | `r6-release-dependencies.json`；pyproject.toml、uv.lock 无改动 |
+| 差异及敏感内容检查 | `git diff --check` 通过；候选提交无运行数据库、日志、截图、缓存或真实凭据 | `r6-release-preflight.json` |
+
+Windows 六项跳过与此前一致：五项 POSIX 进程组契约，以及一项缺少合适系统文件的符号链接用例；WSL 对应套件没有跳过。SubAgent 日志末尾的 `failed: boom` 仍为异常处理测试的预期注入，结果按 90/90 与退出码判定。没有修改产品代码或测试断言来取得本次结果；仅同步目标说明中过时的人工验收状态并补本节记录。
+
+### 实际命令与隔离方式
+
+实际从独立仓库执行的编排命令如下。编排脚本只在本地忽略目录，负责创建新临时 CWD、复制 README.md / pyproject.toml、设置环境并顺序运行下面列出的检查，不属于发布源码。
+
+```powershell
+& C:/Users/28436/.conda/envs/deskmate-win/python.exe -s -B -X utf8 .r1-verification/r6_release_run.py D:/ldj/03/DeskMate-Standalone win
+wsl.exe -d Ubuntu-24.04 --cd /mnt/d/ldj/03/DeskMate-Standalone -- /home/ldj/anaconda3/envs/cc/bin/python -s -B -X utf8 .r1-verification/r6_release_run.py /mnt/d/ldj/03/DeskMate-Standalone wsl
+```
+
+Windows 实际 Python 为 3.12.7、SQLite 3.54.1；WSL 为 Python 3.11.16、SQLite 3.53.4；PySide6 均为 6.8.3。两平台设置 `QT_QPA_PLATFORM=offscreen`、`PYTHONDONTWRITEBYTECODE=1`、`PYTHONUTF8=1`，`PYTHONPATH` 为各自仓库及 tests 路径。Windows 临时 CWD 为 `.r1-verification/r6-release-win-cwd-1foy0vmu`，WSL 为 `/tmp/r6-release-wsl-cwd-1vnv4q9j`，没有使用此前用户的人工验收目录。
+
+编排执行的完整回归及辅助命令如下（`<python>` / `<repo>` 对应上面的各平台绝对路径，`<cwd>` 为上述实际临时 CWD，`<platform>` 为 win 或 wsl；重新验收时为 cwd/basetemp 另选全新路径）：
+
+```text
+<python> -s -B -X utf8 -m pytest -q -ra -p no:cacheprovider -c <repo>/pyproject.toml --rootdir=<repo> <repo>/tests --basetemp=<cwd>/pytest --junitxml=<repo>/.r1-verification/r6-release-<platform>-full.xml
+<python> -s -X utf8 <repo>/tests/verify_subagent.py
+<python> -s -X utf8 -m likecc --help
+<python> -s -X utf8 -m likecc.desktop --help
+<python> -s -X utf8 -m examples.deskmate_memories --help
+<python> -s -X utf8 -m examples.deskmate_memories --check --review-fixture --root <cwd>/visible-demo
+<python> -s -B -X utf8 <repo>/.r1-verification/r6_compile.py <repo> release-<platform>
+```
+
+编译脚本遍历 likecc/tests/examples/scripts 的 201 个 Python 文件，执行 `ast.parse(source)` 和 `compile(source, filename, 'exec')`，不写 pyc，并对规范化换行后的源码计算 SHA-256。提交前再对照两平台编译清单与暂存 blob，保证提交的是已测试内容。
+
+依赖与 Git 只读检查实际命令如下；uv 缓存限于独立仓库忽略目录，没有升级依赖或修改全局 Git 设置：
+
+```powershell
+$env:UV_CACHE_DIR='D:/ldj/03/DeskMate-Standalone/.r1-verification/uv-release-cache'
+& C:/Users/28436/.local/bin/uv.exe lock --check --offline --default-index https://pypi.org/simple --python C:/Users/28436/.conda/envs/deskmate-win/python.exe
+& C:/Users/28436/.local/bin/uv.exe pip check --python C:/Users/28436/.conda/envs/deskmate-win/python.exe --offline --no-config
+git -c safe.directory=D:/ldj/03/DeskMate-Standalone diff --check
+git -c safe.directory=D:/ldj/03/DeskMate-Standalone diff --exit-code HEAD -- pyproject.toml uv.lock
+```
+
+### 提交范围和证据边界
+
+候选源码树共 230 个文件，路径扫描没有发现运行数据库、WAL/SHM、`.likecc/`、本地验收产物、环境或缓存。凭据启发式扫描的八处候选逐一核对为模板占位符、离线 demo/test 字符串或 URL 拒绝测试夹具，没有发现真实凭据；源码、数据库初始化、虚构夹具与使用文档全部保留。29 个 R6 文件按明确清单暂存，随后核对暂存名称、统计、空白检查及 Git 规范化后的 blob 与工作区一致性。
+
+七项 Windows 可见桌面人工验收沿用本文件的原始人工记录，本次新证据是双平台离线套件、SubAgent、编译、帮助和样例准备。没有真实 Provider 调用；真实模型记忆质量和 R5 用户跳过的真实拒绝写入仍未验收。工作区切回的保守中断恢复、词法检索误召回/漏召回、来源审计尚无自动过期、跨平台同库并发不支持等限制不变。不开展 R7，也不操作原 DeskMate/LikeCC 仓库。

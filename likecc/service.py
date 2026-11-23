@@ -15,11 +15,12 @@ from copy import deepcopy
 from typing import AsyncIterator
 from weakref import WeakValueDictionary
 
-from likecc.agent import AgentEvent, CompactNotification, ErrorEvent, LoopComplete, ToolResultEvent
+from likecc.agent import AgentEvent, CompactNotification, ErrorEvent, LoopComplete, ToolResultEvent, MemoryRecall
 from likecc.conversation import ConversationManager, Message, ToolResultBlock
 from likecc.interaction import Interaction
 from likecc.memory import MemoryManager, SessionManager, find_relevant_memories, render_reminder, generate_session_summary
 from likecc.memory.session import RecordType, SessionRecord, make_compact_boundary
+from likecc.memory.workspace import WorkspaceMemory, render_recall
 from likecc.runtime import finish_cleanup
 
 _session_owners: WeakValueDictionary = WeakValueDictionary()
@@ -101,18 +102,24 @@ class RunHandle:
 
 class SessionService:
     def __init__(self, runtime, *, persistent: bool = False, memory: bool = False,
-                 summaries: bool = False, cleanup_sessions: bool = False, affairs=None):
+                 summaries: bool = False, cleanup_sessions: bool = False, affairs=None,
+                 workspace_memory: bool = False):
         if runtime.agent is None or runtime.closed:
             raise RuntimeError("Initialize Runtime before creating a service")
         if getattr(runtime, "service", None) is not None:
             raise RuntimeError("Runtime already has a session service")
+        if workspace_memory and not persistent:
+            raise ValueError("工作区记忆需要持久会话来源")
         self.runtime = runtime
         self.agent = runtime.agent
         self.affairs = affairs
         self._tool_session_root = self.agent.session_dir
         self.conversation = ConversationManager()
         self.session_manager = SessionManager(runtime.work_dir) if persistent else None
-        self.memory_manager = MemoryManager(runtime.work_dir) if memory else None
+        self.memory_manager = MemoryManager(runtime.work_dir) if memory and not workspace_memory else None
+        self.workspace_memory = WorkspaceMemory(runtime.work_dir) if workspace_memory else None
+        self.last_source_id = None
+        self.recalled_memories = []
         self.summaries = summaries
         self.session = None
         self.active_run: RunHandle | None = None
@@ -127,6 +134,8 @@ class SessionService:
         try:
             self.new_session()
         except BaseException:
+            if self.workspace_memory:
+                self.workspace_memory.close()
             if self.session:
                 self.session.close()
                 _session_owners.pop((self.runtime.work_dir, self.session.session_id), None)
@@ -144,6 +153,8 @@ class SessionService:
         from likecc.filehistory import FileHistory
         self._token_baseline = self.session.meta.total_tokens if self.session else 0
         self.agent.reset_session_context()
+        self.last_source_id = None
+        self.recalled_memories = []
         self.agent.session_dir = self._tool_session_root / uuid.uuid4().hex
         self.agent.session_dir.mkdir(parents=True, exist_ok=True)
         self.agent.session_id = self.session.session_id if self.session else ""
@@ -206,6 +217,9 @@ class SessionService:
 
     def start(self, prompt: str, *, interactive: bool = False, permission_timeout: float = 300) -> RunHandle:
         self._ensure_idle()
+        # Only a successfully captured source for this run may be linked later.
+        # A failed capture must not leave the previous run available in the UI.
+        self.last_source_id = None
         if self.affairs is not None:
             self.affairs.begin(prompt)
         handle = RunHandle(self, interactive, permission_timeout)
@@ -228,6 +242,42 @@ class SessionService:
         if self.session:
             self.session.append_record(SessionRecord(
                 RecordType.RUN_STATE, {"run_id": run.run_id, "status": run.status}, datetime.now(timezone.utc)))
+
+    def _audit(self, kind, data):
+        if self.session:
+            self.session.append_record(SessionRecord(kind, data, datetime.now(timezone.utc)))
+
+    def propose_memory(self, content, kind="preference", *, from_run=False, quote=None):
+        self._ensure_idle()
+        if not self.workspace_memory or not self.session:
+            raise ValueError("当前会话未启用工作区记忆")
+        content = self.workspace_memory.validate(kind, content)
+        if from_run:
+            if not self.last_source_id or self.last_run is None:
+                raise ValueError("当前会话尚无资料运行记录")
+            source = self.workspace_memory.source(self.last_source_id)
+            if (source["session_id"] != self.session.session_id
+                    or source["run_id"] != self.last_run.run_id or source["kind"] != "task_run"):
+                raise ValueError("来源不属于当前资料运行，请重新核对")
+            source_id = self.last_source_id
+        else:
+            source_id = self.workspace_memory.record_source(session_id=self.session.session_id,
+                run_id=uuid.uuid4().hex, kind="user_statement", quote=quote or content)
+        row = self.workspace_memory.propose(kind, content, source_id)
+        self.conversation.add_user_message(quote or f"请保存记忆：{content}")
+        self.conversation.add_assistant_message("记忆已列为待确认；请在工作区记忆窗口核对内容和来源后确认保存。")
+        self._flush()
+        self._audit(RecordType.MEMORY_ACTION, {"action": "propose", "memory": row})
+        return row
+
+    def change_memory(self, memory_id, revision, action, **values):
+        self._ensure_idle()
+        if not self.workspace_memory or not self.session:
+            raise ValueError("当前会话未启用工作区记忆")
+        self.workspace_memory.change(memory_id, revision, action=action,
+            session_id=self.session.session_id, **values)
+        self._audit(RecordType.MEMORY_ACTION, {"action": action, "memory_id": memory_id,
+            "revision": revision + 1, **values})
 
     def _flush(self):
         if self.session:
@@ -288,6 +338,12 @@ class SessionService:
                 if reminder:
                     self._add_transient(reminder)
                     self._recall_message = self.conversation.history[-1]
+            if self.workspace_memory:
+                self.recalled_memories = self.workspace_memory.recall(prompt)
+                self.agent.request_memory = render_recall(self.recalled_memories)
+                self._audit(RecordType.MEMORY_RECALL, {"run_id": run.run_id,
+                    "memories": self.recalled_memories})
+                run._emit(MemoryRecall(deepcopy(self.recalled_memories)))
             async with aclosing(self.agent.run(self.conversation, interaction=run.interaction if run.interactive else None)) as events:
                 async for event in events:
                     if isinstance(event, LoopComplete):
@@ -311,10 +367,21 @@ class SessionService:
             if not fatal_reported:
                 run._emit(ErrorEvent(str(exc), fatal=True))
         finally:
+            self.agent.request_memory = ""
             run.interaction.close()
             try:
                 if self.affairs is not None:
                     self.affairs.finish()
+                    if self.workspace_memory:
+                        evidence = self.affairs.summary()
+                        evidence["digests"] = {p: e.get("digest") for p, e in self.affairs.artifacts.items()}
+                        evidence["write_intents"] = deepcopy(self.affairs.write_intents)
+                        evidence["status"] = run.status
+                        self.last_source_id = self.workspace_memory.record_source(
+                            session_id=run.session_id, run_id=run.run_id, kind="task_run",
+                            quote=prompt, evidence=evidence)
+                        self._audit(RecordType.RUN_EVIDENCE,
+                            self.workspace_memory.source(self.last_source_id))
                 if run.status != "completed":
                     self._repair_interrupted_tools(results)
                 self._flush()
@@ -401,3 +468,5 @@ class SessionService:
             if self.session:
                 self.session.close()
                 _session_owners.pop((self.runtime.work_dir, self.session.session_id), None)
+            if self.workspace_memory:
+                self.workspace_memory.close()

@@ -37,6 +37,7 @@ class ScheduleWindow(QDialog):
         self.edit_id = self.edit_revision = None
         self._tasks = self._executions = []
         self._draft_token = None
+        self._reviewed_execution_id = None
         layout = QVBoxLayout(self)
         self.notice = text_label()
         layout.addWidget(self.notice)
@@ -70,10 +71,11 @@ class ScheduleWindow(QDialog):
             listing.addWidget(widget)
         self.complete.clicked.connect(lambda: self.action("schedule_complete"))
         self.allow_model.clicked.connect(lambda: self.action("schedule_allow_model"))
-        self.retry.clicked.connect(lambda: self.action("schedule_retry", reviewed=self.reviewed.isChecked()))
+        self.retry.clicked.connect(lambda: self.action("schedule_retry",
+            reviewed_execution_id=self._reviewed_execution_id))
         self.tasks.currentIndexChanged.connect(self.show_executions)
         self.executions.currentIndexChanged.connect(self.show_details)
-        self.reviewed.toggled.connect(self.show_details)
+        self.reviewed.toggled.connect(self.review_selection)
 
         form = QFormLayout()
         editing.addLayout(form)
@@ -117,8 +119,14 @@ class ScheduleWindow(QDialog):
         self.show_executions()
 
     def action(self, command, **kwargs):
+        if command == "schedule_retry" and self._reviewed_execution_id != self.executions.currentData():
+            return
         self.submit_command(command, execution_id=self.executions.currentData(), **kwargs)
         self.reviewed.setChecked(False)
+
+    def review_selection(self, checked):
+        self._reviewed_execution_id = self.executions.currentData() if checked else None
+        self.show_details()
 
     def clear_form(self):
         self.edit_id = self.edit_revision = None
@@ -192,6 +200,8 @@ class ScheduleWindow(QDialog):
         self.show_details()
 
     def show_details(self):
+        if self._reviewed_execution_id != self.executions.currentData():
+            self.reviewed.setChecked(False)
         row = next((e for e in self._executions if e["id"] == self.executions.currentData()), None)
         self.complete.setEnabled(bool(row and row["status"] == "pending"))
         self.allow_model.setEnabled(bool(row and row["status"] == "awaiting_model"))
@@ -205,5 +215,6 @@ class ScheduleWindow(QDialog):
         output_names = {"written": "已写入，未回读", "verified": "已回读核对", "readback_failed": "回读失败", "write_unverified": "可能写入，待核对"}
         artifacts = "\n".join(f"{a['path']}：{output_names.get(a['status'], a['status'])}" for a in evidence.get("artifacts", []))
         self.details.setPlainText(f"{row['label']}\n{row['reason']}\n开始：{row['started_at'] or '尚未开始'}\n结束：{row['ended_at'] or '尚未结束'}\n"
+            f"核对记录：{row['reviewed_at'] or '尚未核对'}\n"
             f"会话：{row['session_id'] or '无'}\n运行：{row['run_id'] or '无'}\n成果：\n{artifacts or '没有已写入成果'}\n\n"
             + describe_spec(row["snapshot"], row["snapshot"]["workspace"]) + "\n\n本次资料与工具证据：\n" + json.dumps(evidence, ensure_ascii=False, indent=2))

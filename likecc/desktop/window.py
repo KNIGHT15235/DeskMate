@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from .controller import DesktopOptions
+from likecc.scheduling import needs_attention
 
 
 def label(text=""):
@@ -29,6 +30,8 @@ class ChatWindow(QMainWindow):
         self._draft = None
         self._reply = None
         self.schedule_window = None
+        self.memory_window = None
+        self._shown_memory_proposal = None
         self._shown_schedule_token = None
         self.setWindowTitle("DeskMate 桌伴")
         self.resize(920, 780)
@@ -53,6 +56,11 @@ class ChatWindow(QMainWindow):
         self.task_button = QPushButton("任务与执行记录")
         self.task_button.clicked.connect(self.show_schedules)
         layout.addWidget(self.task_button)
+        self.memory_button = QPushButton("工作区记忆与来源")
+        self.memory_button.clicked.connect(self.show_memories)
+        layout.addWidget(self.memory_button)
+        self.memory_summary = label()
+        layout.addWidget(self.memory_summary)
         sessions = QHBoxLayout()
         self.sessions = QComboBox()
         self.sessions.setMinimumContentsLength(28)
@@ -116,6 +124,14 @@ class ChatWindow(QMainWindow):
         self.schedule_window.show()
         self.schedule_window.raise_()
 
+    def show_memories(self):
+        if self.memory_window is None:
+            from .memories import MemoryWindow
+            self.memory_window = MemoryWindow(self.controller, self._submit, self)
+        self.memory_window.refresh()
+        self.memory_window.show()
+        self.memory_window.raise_()
+
     def _submit(self, command, **data):
         command_id = self.controller.submit_ui(command, **data)
         if command_id is None and (self.lifecycle is None or not self.lifecycle.is_closing):
@@ -146,7 +162,17 @@ class ChatWindow(QMainWindow):
         self.input.setPlaceholderText("输入任务；离线演示会依次请求写文件、问答，可选择等待取消" if state["demo"] else
             "提供公开网页 URL、工作区内的文本或 Markdown，以及要生成的 Markdown 路径")
         self.show_materials(state.get("materials"))
-        outstanding = sum(e["status"] in {"pending", "awaiting_model", "waiting", "interrupted", "blocked_review"} for e in state.get("executions", []))
+        self.memory_button.setText(f"工作区记忆与来源 · {len(state.get('memories', []))} 条")
+        used = state.get("recalled_memories", [])
+        lines = [f"{m['content'][:80]} · 命中：{', '.join(m['matched'])} · 来源会话 {m['source']['session_id']}"
+                 for m in used]
+        self.memory_summary.setText("定时任务不召回前台记忆" if state.get("scheduled_execution") else
+            "本次使用记忆：\n" + "\n".join(lines) if used else "本次未使用工作区记忆")
+        proposal = state.get("memory_proposal")
+        if proposal and proposal != self._shown_memory_proposal and self.isVisible():
+            self._shown_memory_proposal = proposal
+            self.show_memories()
+        outstanding = sum(needs_attention(e) for e in state.get("executions", []))
         self.task_button.setText(f"任务与执行记录 · {len(state.get('tasks', []))} 项安排 · {outstanding} 项待处理/确认")
         draft = state.get("schedule_draft")
         if draft and draft["token"] != self._shown_schedule_token and self.isVisible():

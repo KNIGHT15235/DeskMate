@@ -1,4 +1,6 @@
-# DeskMate 桌面入口（R3–R5）
+# DeskMate 桌面入口（R3–R6）
+
+R6 增加“工作区记忆与来源”窗口。发送“请记住，…”或在窗口填写待保存内容，再确认；前台按当前请求显示本次召回及来源，支持更正、删除和恢复来源会话。事务来源以 session/run 定位，不单用 S1；查看来源不执行工具。定时任务不召回前台记忆。[使用与完整离线人工清单](deskmate-memory.md)。
 
 R5 增加“任务与执行记录”窗口。聊天中的明确安排先解析为预览，也可用表单创建/修改一次性或每周任务。确认本地时间、时区及材料/输出范围后保存；模型调用授权独立选择，网页与写入继续使用 R4 卡片。后台到期调度不依赖窗口可见性；真正退出停止领取，重开保留提醒、历史和中断线索。[操作、存储位置、恢复策略与三条验收流程](deskmate-schedules.md)。
 
@@ -33,7 +35,7 @@ python -m likecc.desktop --work-dir /mnt/d/ldj/03/DeskMate --provider your-provi
 
 第二条是真实模式，必须先准备现有 LikeCC 配置。`--provider` 可省略，取合并后配置中的首个 Provider。显式工作区按用户配置→该项目 `.likecc/config.yaml`→该项目 `.likecc/config.local.yaml` 加载，保持原字段合并规则，不改变进程 cwd。界面在发送前显示工作区与模型，不展示 Key；无效配置可改路径重试，或进入离线演示。
 
-可选开关：`--skills --mcp --hooks --memory --summaries`，默认全部关闭；演示无论传哪些开关都保持关闭。权限固定为现有 `default`，没有默认 bypass 或永久授权按钮。本轮不提供权限模式编辑器。真实模式的用户数据路径仍为 `~/.likecc`，项目会话仍在工作区 `.likecc/sessions`。
+可选开关：`--skills --mcp --hooks --summaries`，默认关闭；演示不加载这些扩展。R6 工作区确认记忆默认启用，`--memory` 仅保留参数兼容，不再开启旧 Markdown 加载/提取。普通 `--demo` 的记忆随临时目录退出删除；验证重启请用 `python -m examples.deskmate_memories`。权限固定为现有 `default`，没有默认 bypass 或永久授权按钮。本轮不提供权限模式编辑器。原用户配置路径仍为 `~/.likecc`，项目会话与记忆分别在工作区 `.likecc/sessions`、`.likecc/memories.sqlite3`。
 
 desktop extra 锁定 PySide6 6.8.3 及三个 Qt 配套包，未升级原依赖版本。没有安装 extra 时原 CLI/core 可用，桌面启动提供安装说明，`--help` 无需 Qt。
 

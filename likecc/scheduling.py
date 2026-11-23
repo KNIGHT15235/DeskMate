@@ -273,7 +273,7 @@ class ScheduleStore:
         rows = self.db.execute("SELECT * FROM executions" + (" WHERE task_id=?" if task_id else "") +
             " ORDER BY due_at DESC, id", (task_id,) if task_id else ())
         return [dict(r) | {"snapshot": json.loads(r["snapshot"]), "evidence": json.loads(r["evidence"]),
-            "label": LABELS[r["status"]]} for r in rows]
+            "label": "已中断，已核对" if r["status"] == "interrupted" and r["reviewed_at"] else LABELS[r["status"]]} for r in rows]
 
     def execution(self, execution_id):
         return next(e for e in self.executions() if e["id"] == execution_id)
@@ -367,6 +367,12 @@ class ScheduleStore:
                 (id,task_id,due_at,snapshot,status,reason,retry_of) VALUES (?,?,?,?,?,?,?)""",
                 (uuid.uuid4().hex, old["task_id"], stamp(due), json.dumps(old["snapshot"], ensure_ascii=False),
                  "awaiting_model", "用户已核对旧结果并要求新一次尝试；沿用旧次范围，需确认模型调用", execution_id))
+
+
+def needs_attention(execution):
+    """Reviewed interruptions remain audit history, not outstanding decisions."""
+    return (execution["status"] in {"pending", "awaiting_model", "waiting", "blocked_review"}
+            or execution["status"] == "interrupted" and not execution.get("reviewed_at"))
 
 
 class ExecutionScope:
