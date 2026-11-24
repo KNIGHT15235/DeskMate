@@ -31,6 +31,8 @@ class ChatWindow(QMainWindow):
         self._reply = None
         self.schedule_window = None
         self.memory_window = None
+        self.notification_window = None
+        self._notification_target = None
         self._shown_memory_proposal = None
         self._shown_schedule_token = None
         self.setWindowTitle("DeskMate 桌伴")
@@ -58,7 +60,12 @@ class ChatWindow(QMainWindow):
         layout.addWidget(self.task_button)
         self.memory_button = QPushButton("工作区记忆与来源")
         self.memory_button.clicked.connect(self.show_memories)
-        layout.addWidget(self.memory_button)
+        centers = QHBoxLayout()
+        centers.addWidget(self.memory_button)
+        self.notification_button = QPushButton("通知中心")
+        self.notification_button.clicked.connect(self.show_notifications)
+        centers.addWidget(self.notification_button)
+        layout.addLayout(centers)
         self.memory_summary = label()
         layout.addWidget(self.memory_summary)
         sessions = QHBoxLayout()
@@ -132,6 +139,46 @@ class ChatWindow(QMainWindow):
         self.memory_window.show()
         self.memory_window.raise_()
 
+    def show_notifications(self):
+        if self.notification_window is None:
+            from .notifications import NotificationWindow
+            self.notification_window = NotificationWindow(self.controller, self._submit, self)
+        self.notification_window.refresh()
+        self.notification_window.show()
+        self.notification_window.raise_()
+
+    def navigate_notification(self, target, state):
+        if not target or target["token"] == self._notification_target:
+            return
+        self._notification_target = target["token"]
+        if target["workspace"] != state["workspace"]:
+            return
+        if target["mode"] == "request" and any(p["request_id"] == target["request_id"]
+                and p["run_id"] == target["run_id"] for p in state["pending"]):
+            # Owned dialogs stay above their main window on Windows, even after
+            # raise_()/activateWindow(). Keep their drafts, but uncover the card.
+            for panel in (self.notification_window, self.schedule_window, self.memory_window):
+                if panel is not None:
+                    panel.hide()
+            if self.lifecycle:
+                self.lifecycle.show_window()
+            else:
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+            self.request_area.verticalScrollBar().setValue(0)
+            self.request_area.setFocus()
+        elif target["execution_id"]:
+            self.show_schedules()
+            self.schedule_window.focus_execution(target["task_id"], target["execution_id"])
+        else:
+            # Ended foreground interactions have no schedule occurrence. Selecting
+            # their session is navigation only; explicit Restore remains available.
+            index = self.sessions.findData(target["session_id"])
+            if index >= 0:
+                self.sessions.setCurrentIndex(index)
+            self.feedback.setText("请求已结束；通知中保留运行与请求 ID，可恢复所选会话查看历史。")
+
     def _submit(self, command, **data):
         command_id = self.controller.submit_ui(command, **data)
         if command_id is None and (self.lifecycle is None or not self.lifecycle.is_closing):
@@ -163,6 +210,8 @@ class ChatWindow(QMainWindow):
             "提供公开网页 URL、工作区内的文本或 Markdown，以及要生成的 Markdown 路径")
         self.show_materials(state.get("materials"))
         self.memory_button.setText(f"工作区记忆与来源 · {len(state.get('memories', []))} 条")
+        unread = sum(n["valid"] and n["state"] == "unread" for n in state.get("notifications", []))
+        self.notification_button.setText(f"通知中心 · {unread} 条未读")
         used = state.get("recalled_memories", [])
         lines = [f"{m['content'][:80]} · 命中：{', '.join(m['matched'])} · 来源会话 {m['source']['session_id']}"
                  for m in used]
@@ -217,6 +266,7 @@ class ChatWindow(QMainWindow):
                         button.setEnabled(True)
                 self._reply = None
         self.send_button.setEnabled(idle and self._draft is None)
+        self.navigate_notification(state.get("notification_target"), state)
 
     def show_materials(self, summary):
         self.materials_summary.setVisible(summary is not None)

@@ -1751,3 +1751,297 @@ git -c safe.directory=D:/ldj/03/DeskMate-Standalone diff --exit-code HEAD -- pyp
 候选源码树共 230 个文件，路径扫描没有发现运行数据库、WAL/SHM、`.likecc/`、本地验收产物、环境或缓存。凭据启发式扫描的八处候选逐一核对为模板占位符、离线 demo/test 字符串或 URL 拒绝测试夹具，没有发现真实凭据；源码、数据库初始化、虚构夹具与使用文档全部保留。29 个 R6 文件按明确清单暂存，随后核对暂存名称、统计、空白检查及 Git 规范化后的 blob 与工作区一致性。
 
 七项 Windows 可见桌面人工验收沿用本文件的原始人工记录，本次新证据是双平台离线套件、SubAgent、编译、帮助和样例准备。没有真实 Provider 调用；真实模型记忆质量和 R5 用户跳过的真实拒绝写入仍未验收。工作区切回的保守中断恢复、词法检索误召回/漏召回、来源审计尚无自动过期、跨平台同库并发不支持等限制不变。不开展 R7，也不操作原 DeskMate/LikeCC 仓库。
+## R7 事件驱动的主动跟进与打扰控制（2026-11-23）
+
+本节为 R7 新证据；上方保留历轮原始记录。独立目录 `D:\ldj\03\DeskMate-Standalone` / `/mnt/d/ldj/03/DeskMate-Standalone`，远端 `KNIGHT15235/DeskMate`，分支 `main`，开始 HEAD `9d1e7d426b625fd978fc2fe4ad20883fc60197a4`，工作区干净，无适用 AGENTS.md。Git 沙箱所有者检查以单次 `-c safe.directory=...` 解决，未改全局 Git 配置。原 DeskMate 目录未开发；本轮不提交、不推送、不调用计费 Provider、不做 R8 分发。
+
+| 检查点 | 结果与证据 |
+| --- | --- |
+| R7-0 事件梳理 | [业务事件—触发位置—展示—操作表](deskmate-notifications.md#r7-0事件和通知入口) 已整理；原唯一 `_consume` 保持 |
+| R7-0 缺陷复现 | 新测试在旧代码 **1 failed、1 passed**：最小化超时未收到气泡，隐藏通过；修复后两种情况均通过 |
+| R7-A 持久化 | 共用 schedules.sqlite3；事务投影、升级静默旧完成、request 级去重、幂等修复、回滚、延后跨重启、证据文案，`test_notifications.py` **19 passed** |
+| R7-B 操作与打扰 | 通知中心/原卡片/具体执行、真实 Future 核验、旧工作区与旧请求拒绝、三个取消语义、跨午夜和批量提示；存储/控制器/生命周期合并专项 **31 passed / 53.31s**，`r7-boundaries-win.xml` |
+| R7-C 正常桌面入口 | `DesktopApplication` + 实际 Qt 控件 + 可控时钟 + fake client + FakeTray；**8 passed / 23.99s**，`r7-journey-win.xml`；含无托盘、允许两次写入/拒绝、失败/部分写入未知、历史恢复和重启不重放 |
+
+首次定稿完整回归（人工复验前的同一源码快照，R6 基线 928 项，当时新增 32 项，总计 960 项；后续导航修复的增量证据见下方人工验收记录）：
+
+| 检查 | 实际结果 | 证据（仓库忽略目录 `.r1-verification`） |
+| --- | --- | --- |
+| WSL Ubuntu-24.04 / cc 完整离线回归 | **960 passed、0 skipped，252.65s，退出 0** | `r7-wsl-full.xml/log` |
+| Windows / deskmate-win 完整离线回归 | **954 passed、6 skipped，347.62s，退出 0** | `r7-win-full.xml/log` |
+| 独立 SubAgent | 两平台各 **90/90，退出 0** | `r7-{win,wsl}-subagent.log` |
+| 入口帮助 | 两平台 CLI、桌面、R7 演示 `--help` 均退出 0 | `r7-{win,wsl}-{cli-help,desktop-help,notification-help}.log` |
+| 离线演示准备与推进 | 两平台 `--check`、`--advance-minutes 10` 均退出 0 | `r7-{win,wsl}-{notification-prepare,notification-clock}.log` |
+| AST / 内存编译 | 两平台各 **207 个 Python 文件**；摘要彼此一致且匹配当前源码 | `r7-{win,wsl}-manifest.json` |
+| 差异检查 | `git diff --check` 通过；main / HEAD 保持基线，无暂存、提交或推送 | 工作区与最终检查输出 |
+
+Windows 六项跳过仍为五项 POSIX 进程组契约和一项无合适系统文件的符号链接用例，没有新增跳过；对应 WSL 用例全部运行。SubAgent 的 `failed: boom` 日志是既有异常注入，按 90/90 汇总和退出码判断。Windows 使用 Python 3.12.7 / SQLite 3.54.1；WSL 为 Python 3.11.16 / SQLite 3.53.4；PySide6 均 6.8.3。
+
+两平台均设 `QT_QPA_PLATFORM=offscreen`、`PYTHONDONTWRITEBYTECODE=1`、`PYTHONUTF8=1`，PYTHONPATH 明确指向本独立仓库及 tests。隔离 CWD 分别为 `.r1-verification/r7-win-cwd-4pvuf4y9` 和 `/tmp/r7-wsl-cwd-mnytd0n2`，复制公开 README/pyproject 供旧 CWD 相关测试使用，pytest basetemp 各自独立，不共写任务库。WSL 沙箱初次 E_ACCESSDENIED 后经获准本机通道执行，未修改产品代码规避权限。
+
+完整检查启动命令（脚本保留在本地验证目录，输出 JSON 汇总及上述日志）：
+
+```powershell
+Set-Location D:\ldj\03\DeskMate-Standalone
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r7_run.py D:/ldj/03/DeskMate-Standalone win
+wsl.exe -d Ubuntu-24.04 --cd /mnt/d/ldj/03/DeskMate-Standalone -- /home/ldj/anaconda3/envs/cc/bin/python -s -B -X utf8 .r1-verification/r7_run.py /mnt/d/ldj/03/DeskMate-Standalone wsl
+```
+
+脱离该本地脚本也可复现：在独立临时 CWD 设置上述环境、复制 README/pyproject 后，用各平台解释器执行 `-m pytest -q -ra -p no:cacheprovider -c <repo>/pyproject.toml --rootdir=<repo> <repo>/tests --basetemp=<新临时目录>/pytest --junitxml=<报告路径>`，再执行 `<repo>/tests/verify_subagent.py` 和各入口帮助。
+
+端到端第一轮暴露展示快照分步发布的竞态，已把相关执行、通知版本、领取结果和导航字段合并发布。Windows Qt 的 QTest 等待可能占用 Python GIL，R7 验收探针显式让出 1ms 并使用与既有 R6 完整流程一致的 20s 上限，保留全部业务断言；连续权限及未知写入完成后，8 条完整流程通过。旧生命周期测试也改为等待后台领取回执后检查模拟托盘，因为气泡去重现在由后台持久存储负责。
+
+本轮离线演示为 `python -m examples.deskmate_notifications`；只替换模型/配置、演示时钟和明确标注的故障注入，实际文件、权限、会话和任务库保持。样例定义预先安排在未来，不伪造已完成历史。`model-inputs.jsonl` 与 `writes.jsonl` 可核对点击、恢复和重开前后的调用次数。完整 [Windows 一次走完清单及复制命令](deskmate-notifications.md#windows-一次走完的可见验收清单) 已提供。
+
+人工观察边界：本轮 Qt 为 offscreen，FakeTray 证明的是 showMessage 调用和主线程路径，不证明 Windows 屏幕上确实出现系统气泡。气泡可见性/系统勿扰/点击/缩放、多显示器和真实无托盘环境仍待人工观察。没有真实 Provider 质量结论。程序完全退出不准点唤醒；气泡先持久领取再显示，崩溃窗口可能少一次系统提示，通知中心仍保留；权限延后不延长请求超时，未知写入不自动重放。首版仍为 Asia/Shanghai/UTC、本地单调度器，不支持 Windows/WSL 同库并发，通知历史尚无自动清理。
+## R7 Windows 可见人工验收进展（2026-11-23）
+
+用户已反馈第 1 条“启动与入口”通过。本次验收根目录为 `C:\Users\28436\AppData\Local\Temp\deskmate-r7-nuguu4kp`，工作区为其下 `A`。只读核查确认五项样例安排已保存，资料任务 Provider 为 `offline-r7 / fake`；核验时一次性提醒为 pending，“两次写入”为 awaiting_model，所有 run_id 均为空，模型输入日志及写入日志均为 0 次。沙箱不能读取新建临时目录，获准使用本机只读通道核查，未修改该工作区数据。
+
+第 2 条将使用这条已有提醒验证延后、完全退出重开、到期再次提示及完成后停止提醒；尚未收到用户反馈，不能记为通过。其余资料任务在重开时如转为 interrupted，属于既有 R5 保守恢复规则，后续按原核对入口明确发起新尝试。
+
+第 2 条重开检查中，用户提供截图并指出预期与界面不对应。2026-11-23 18:32（UTC+8）只读核验：一次性提醒仍是唯一通知 `55032ed8b7824302b8f50d53493a86f1`，对应原执行 `9ed3277d11444362b297626b3941d9c0`，state=snoozed、valid=1，延后截止 `2026-11-23T10:40:13.211169+00:00`（北京时间 18:40:13），generation=1、alerted_generation=0；原 due_at 未修改，重复 event_key 查询为空。列表九行实际为一条延后提醒、四条有效中断通知和四条已失效的模型确认历史，后者不会再提示。截图当前选中“R7 拒绝写入”，所以详情显示“稍后提醒时间：无”；不是所选提醒的详情。验收说明此前未充分说明历史行同时保留，已向用户澄清并要求仅选择一次性提醒查看其延后时间。演示时钟偏移仍为 0，模型输入及写入调用仍各 0 次；延后持久性有只读证据，界面时间确认、再次提示及完成后的停止提醒仍待后续人工反馈。
+
+用户随后确认上述检查正确，并明确反馈延后到期后“看到了单条提醒气泡”。再次只读核验：演示时钟偏移为 10 分钟，同一提醒执行已为 done，原通知 state=viewed、valid=0、generation=1、alerted_generation=1，延后代次已经领取且事项已结束；模型输入及写入调用仍各 0 次。第 2 条提醒延后、退出重开、再次提示和完成收尾记为通过，Windows 单条系统气泡有本次人工反馈支持。
+
+第 3 条开始前只读确认“R7 两次写入”安排仍启用，唯一旧执行 `0c501c1d92134b28a21703239ea3537f` 为 interrupted、尚未核对，无 session/run、evidence 为空；冻结范围为读取 project_notes.md、写入 outputs/first.md 与 outputs/second.md，两个输出均不存在。接下来由用户在原核对入口明确发起新尝试，再确认模型及两个独立写入权限；该条尚未验收通过。
+
+用户反馈第 3 条通过。只读核验新执行 `e5de2fddf28d4916b7cb958d1769a5c1` 为 completed，retry_of 指向旧中断执行；原执行已核对。新运行 `8fdf4e0defa04075a79b570b174395a7` 下两个不同 request_id 分别对应 outputs/first.md 与 outputs/second.md，均为 allow，结束后 active=0。两个 artifact 均 verified，磁盘文本 SHA-256 均与持久摘要 `f02a6fa4686bfdfb14f71621cbcf2cc34e67b6a384b94142ba42db6a8b84df63` 一致；完成通知关联新执行、含两个正确成果且已查看。fake client 输入共 6 次、真实本地写入边界共 2 次，只有这两个输出，denied.md 尚不存在。对照保存在 `.r1-verification/r7-manual-step3.json`。
+
+权限入口覆盖单列：两条权限通知 state 仍为 unread，第二条 alerted_generation=-1；用户补充确认“两次均直接在主窗口卡片允许”。因此第 3 条的两次独立授权、实际写入、回读及完成通知定位记为人工通过，不能把它扩展为两次都通过权限通知导航或两次系统气泡通过。第 4 条将明确从权限通知“继续处理”进入原卡片后拒绝写入，同时补验这条通知入口；尚未操作或判为通过。
+
+用户反馈第 4 条通过。只读核验新执行 `edf320128dd141d9bc6825e605f4a390` 为 completed，关联旧中断记录 `caa481541a7f4894a60850c270fd9d3e`；WriteFile 请求 `6c3cca1d3aed4d26b887a23ad6ddb14a` 已记录 deny、active=0。成果、写入意图和摘要均为空，磁盘 outputs/denied.md 不存在。完成通知明确写“本次有写入被拒绝”“没有已写入的成果记录”，没有 verified 成功文案；证据还保留脚本随后读取不存在目标的工具错误。累计 fake client 输入为 10 次，写入边界仍仅第 3 条的 2 次；first.md/second.md 的内容摘要、大小和修改时间与第 3 条对照完全一致。拒绝决定、文案与磁盘结果已有人工反馈和只读证据。
+
+第 4 条的权限通知仍为 unread、alerted_generation=-1，故单独向用户核对实际进入方式，暂不将通知导航判为人工通过。第 5 条起始状态已只读确认：R7 失败与 R7 未知写入的旧执行均为未核对的 interrupted，无 session/run 和执行证据，failed.md/unknown.md 均不存在；后续仍由用户明确发起样例新尝试。
+
+用户对第 4 条权限入口的补记回答为“不确定”。因此保留拒绝决定、通知文案和磁盘结果通过，权限通知导航仍为未确认，不根据该回答推断界面缺陷或已通过。已给出第 5A 模型失败与重复查看步骤，尚待执行反馈；第 5B 将在权限等待处停下，逐步核对通知导航，再由用户明确允许离线故障样例写入，无需为补记重做第 4 条。
+
+用户确认 5A“已看到失败通知”。只读核验新执行 `f556b81f18a84b389b6758fa2000a637` 为 failed，retry_of 为旧中断执行 `d7fcfd4619434f5491d29c400a73b08b`，会话 `session_20261123_185743_kadc`、运行 `a36069fcd21d443db5b61b4c7cd7049e`，原因为预设离线模型失败；成果、来源、写入意图均为空，failed.md 不存在。失败通知 `9f95f0df0f614f01adb99709d406e06d` 已查看并关联该次执行。重复查看前对照为 8 条执行、3 个权限请求、11 次 fake client 输入、2 次写入边界；first.md/second.md 的摘要与修改时间仍匹配第 3 条。对照保存为 `.r1-verification/r7-manual-step5a-before-review.json`，接下来只重复打开同一失败通知，核对不会自动重试；重复查看结论尚待反馈与后续对照。
+
+用户反馈“重复查看正确”。5A 后续只读对照通过：执行数仍为 8、权限请求仍为 3、fake client 输入仍为 11、写入边界仍为 2；同一失败执行状态及 session/run 保持，reviewed_at 仍为空，failed.md 未生成，first.md/second.md 的字节摘要和修改时间均未改变。5A 的失败通知、具体执行定位、重复查看不自动重试记为人工与只读对照通过，证据为 `.r1-verification/r7-manual-step5a-after-review.json`。
+
+5B 开始前再次只读确认未知写入安排仍只有原中断执行 `794836e9830f426eaa36caccb647326d`，无 session/run、无证据、未核对，unknown.md 不存在。下一步仅由用户核对旧记录、发起新尝试并允许离线模型，在 unknown.md 的权限通知出现时停下；通知导航及实际部分写入结果尚未验证。
+
+用户确认已看到 unknown.md 权限通知，并明确点击了通知中心中的该行。20:30（北京时间）只读核验：新执行 `78fcddd61301473b965df59f0e14dc5a` 为 waiting，运行 `a7340e383400420c8c7a9a1c3ab2c7c0`，请求 `ece4c53528784fbbb8b3e56c2cfc2eee` 仍 active=1、resolution 为空；对应权限通知 `c6e590b13e3144519a3d29025ad0338e` 已为 viewed、valid=1。unknown.md 仍不存在，累计 fake client 输入为 13、写入边界仍为 2；用户点击通知没有批准或写入。该对照保存为 `.r1-verification/r7-manual-step5b-before-allow.json`。下一步由用户在原权限卡片明确允许一次，才触发预设的部分写入故障；该故障结果仍待反馈。
+
+5B 用户随后报告没有回到权限卡片，并补充点击后看到的是“任务与执行记录”。该导航不能记为通过。只读核查确认通知已被接收、当时请求仍有效；新增真实 Qt 复现中，后台导航目标为 request，但原任务 QDialog 留在主窗口上方，仅隐藏通知中心、raise 主窗口不足以露出卡片。旧测试在允许模型后主动隐藏任务窗口，漏掉了这条路径。补充回归保留任务和记忆窗口，旧实现得到 **1 failed**（`r7-nav-red.xml`，明确断在任务窗口仍可见），随后在 `ChatWindow.navigate_notification` 修复：仅在匹配的有效请求分支隐藏附属窗口，保留草稿，恢复主窗口、滚回卡片顶部并聚焦。历史和超时仍沿原执行记录处理。
+
+排查期间该请求于真实时间 20:33:15 达到五分钟等待上限，resolution=ended，而非用户 allow/deny；本次执行成为 completed，理由为无成果且有工具拒绝/失败。模拟时钟偏移为十分钟，因此执行记录 started_at/ended_at 对应 20:38:15/20:43:15，不能将它们误认为权限等待的实际墙钟。unknown.md 仍不存在、写入边界仍为 2；fake client 输入从 13 到 15，是超时后原离线脚本继续读取失败并结束，没有创建新一次执行。未触发未知写入故障，不能据此通过 5B。20:46 再次只读对照及完整记录保存为 `.r1-verification/r7-manual-step5b-navigation-timeout.json`。排查没有操作用户的权限按钮、重试或更改演示数据库；computer-use 只读访问窗口树，截图捕获超时后改用可访问性树。
+
+修复后的 Windows `test_r7_acceptance.py` 为 **16 passed / 45.07s**（`r7-nav-journey.xml`）：原 8 项及新增 8 项，新增为行点击/按钮 × 可见/最小化/隐藏/无托盘，并检查重复导航不增加调用/写入、卡片与按钮可见、聚焦、未保存草稿保留。第一次修复后试跑有 5 项焦点断言过早，补为等待 Qt 异步激活后完整 16 项通过，没有移除焦点断言。相关窗口、生命周期、通知与等待态回归另 **30 passed / 81.11s**（`r7-nav-win.xml`），使用独立临时 CWD。上方 960 项全量结果属于人工复验前快照，本次补丁的证据单列。修复尚需用户完全退出并以原验收根目录重开，再明确发起新尝试观察 Windows 可见导航；旧权限不会复活。
+
+WSL cc 在独立临时 CWD 合并运行同一组 46 项，首次 **45 passed、1 failed / 134.15s**（`r7-nav-wsl.xml`）；包括新增 8 项在内的全部 16 项 R7 流程通过。唯一失败为旧窗口测试 `test_gui_permission_question_hidden_resume_and_no_duplicate_execution[False]`，断在初始发送按钮就绪前的 6 秒启动等待，尚未进入任何通知导航。随后在新的隔离目录单独复跑整个 `test_desktop_window.py`，**9 passed / 51.28s**（`r7-nav-wsl-startup-recheck.xml`），未修改该旧测试或其超时。保留首次失败和复跑两份证据，不将首次结果改写为全绿。双平台新增导航组合均已验证，`git diff --check` 通过；真实 Windows 修复后可见效果仍待用户反馈。
+
+用户确认已以原根目录重开。21:26（北京时间）只读核验：未知写入仍只有原中断执行和上次超时结束的执行 `78fcddd61301473b965df59f0e14dc5a`，没有自动生成新尝试；旧请求 active=0，其权限通知为历史。unknown.md 不存在，fake client 输入仍为 15、写入边界仍为 2。重开没有恢复旧授权或增加调用。下一步由用户核对这条已结束记录并明确创建新一次执行，先停在等待模型确认，避免在等待对话反馈时再次消耗权限的五分钟有效期；修复后的实际导航仍待该新请求复验。
+
+用户确认已看到新一次模型确认。只读核验新执行 `f5ab7bdb5f214cfc807f23c22ca90f1f` 为 awaiting_model，retry_of 指向上次超时结束记录，session/run 尚为空；原记录已核对。unknown.md 仍不存在，fake client 输入仍为 15、写入边界仍为 2。下一轮人工操作保留任务窗口打开，从托盘通知中心点击该新执行的权限通知，先观察是否露出原卡片，再由用户明确允许一次并观察离线部分写入故障；尚未将导航修复或未知写入验收记为通过。
+
+用户反馈“已回到卡片并允许，已看到中断待核对”，本次修复后的权限通知导航有可见人工反馈支持。只读核验执行 `f5ab7bdb5f214cfc807f23c22ca90f1f` 为 interrupted，会话 `session_20261123_213152_w9mh`、运行 `bff08a9c2bbc4264b7531b9f1c06bc00`；独立请求 `5338ad6269e84de192e4f01eafb0bdcf` resolution=allow、active=0，权限通知已查看。中断通知 `23afd6033af94143906fa854451c9b46` 已查看并关联同一次执行，明确写入结果未知、回读未通过，没有 verified 成功文案。磁盘 unknown.md 为 32 字节，内容为“R7 故障注入：部分写入\n”，artifact=readback_failed、write_intent=write_unverified，与注入结果相符；reviewed_at 仍为空。first.md/second.md 的摘要和修改时间不变，denied.md/failed.md 仍不存在。重复查看前对照为 10 条执行、5 个权限请求、19 次 fake client 输入、3 次写入边界，完整摘要和日志哈希保存在 `.r1-verification/r7-manual-step5b-before-review.json`。通知导航和故障结果已核实，接下来只重复查看这次中断记录，尚未提前通过未知写入的重复查看检查。
+
+用户反馈“未知写入重复查看正确”。后续只读对照中，execution 全字段、五个输出文件的存在性/内容摘要/修改时间、两份调用日志的行数和整体哈希、执行数和请求数均与重复查看前一致：仍为 10 条执行、5 个权限请求、19 次 fake client 输入、3 次写入边界；未知写入仍为 interrupted，reviewed_at 为空。完整对照保存为 `.r1-verification/r7-manual-step5b-after-review.json`。第 5 条的失败与未知写入通知、具体执行定位和重复查看不重试记为通过，修复后的权限通知导航也有本次人工反馈。历史会话恢复与最终重开对照留在最后一条验收。第 6 条尚未开始；只读确认工作区仍未保存免打扰配置，演示时钟偏移保持 10 分钟，接下来先由用户保存 Asia/Shanghai 的 22:00–08:00 跨午夜时段，再逐步检查静音入库、积压提示和取消语义。
+
+用户反馈“免打扰已保存”。只读确认 notification_meta.quiet 为 enabled=true、22:00–08:00、Asia/Shanghai；演示时钟偏移保持 10 分钟，核验时演示本地时间为 2026-11-24 00:07:58，处于跨午夜静音区间。模型输入仍 19 次、写入仍 3 次，现有四条有效结果通知均已领取过本代提示，没有新事项可用于静音验证，因此尚不把“没有气泡”记为通过。接下来由用户通过原任务窗口创建两条一次性提醒 R7 静音提醒 A/B，在最小化后推进演示时钟并观察静音期间入库；原五项安排和未知写入核对状态保持。
+
+用户反馈两条静音提醒均出现、期间没有看到系统气泡。只读核验 A/B 分别只有一条 pending 执行 `4abba6ce0bfe49c19d053b708cf7ef4f` / `e7441e3b8f7f4701add27a0c0ebec1f7`；对应通知 `92d85047fe864a07acc0cf7c48592e04` / `8346f0ce9320441781b20fa5cd886152` 均 unread、valid=1、generation=0、alerted_generation=-1，尚未领取气泡。两条首次本地时间都是 2026-11-24 01:00（Asia/Shanghai），到期后仍入中心且不改变待处理状态。此次实际持久演示时钟偏移为 60 分钟，核验时演示时间为 01:11:21，跨午夜免打扰仍启用；模型输入仍 19、写入仍 3。第 6 条中的静音入库小步通过，对照为 `.r1-verification/r7-manual-step6a-quiet.json`。下一步按当前读数再推进 410 分钟越过 08:00，保持免打扰配置，观察两条积压是否只生成一条汇总提示；此项尚未提前判定。
+
+用户反馈“一条汇总气泡”。只读核验演示偏移为 470 分钟，本地演示时间 2026-11-24 08:05:13；免打扰配置仍启用且保持 22:00–08:00，已自然越过结束边界。A/B 两条通知仍各一条、unread、valid=1、generation=0，alerted_generation 均由 -1 变为 0；last_alert 为演示本地时间 08:04:03。两条任务及执行全部字段与静音时对照相同，仍 pending；模型输入仍 19、写入仍 3。结合人工只见一条气泡，静音结束后的积压合并提示记为通过，证据为 `.r1-verification/r7-manual-step6b-summary-alert.json`。第 6 条的三个取消语义尚待操作，接下来先对 A 使用“关闭本条提醒”，检查通知关闭而任务仍待处理，B 保持原状。
+
+用户反馈“关闭提醒后，A 仍待处理”。只读核验 A 通知 state=handled、valid=1，其任务仍 enabled=1、原执行仍 pending；B 通知仍 unread，任务与执行状态保持。两份调用日志的行数和哈希不变，仍为 19 次 fake client 输入、3 次写入，三个已有文件摘要及修改时间不变。“关闭本条提醒”仅关闭该通知、不完成或取消任务的小步通过，证据为 `.r1-verification/r7-manual-step6c-dismiss.json`。同时建立取消单次执行前对照：R7 两次写入仍 enabled=1、revision=1、next_due=2026-11-30T10:27:03.323653+00:00；旧已完成执行 `e5de2fddf28d4916b7cb958d1769a5c1` 尚未核对。接下来由用户明确创建新尝试，停在模型确认前，再从该次通知选择“取消本次执行（保留未来周期）”；不会要求允许模型或重写已有成果，该项尚未通过。
+
+用户反馈“本次已取消，安排仍保留”。只读核验新执行 `29a6003455684006993d423ac11f6e0a` 为 cancelled，原因为“用户取消本次执行；未来周期保持”，session/run 为空；retry_of 指向原已完成执行，原执行仅按明确重试流程补记 reviewed_at。R7 两次写入任务全部字段与操作前对照一致，仍 enabled=1、revision=1，下次周期仍为 2026-11-30T10:27:03.323653+00:00。两份日志哈希及三个文件摘要/修改时间也相同，仍为 19 次 fake client 输入、3 次写入，取消前没有调用模型。“取消本次执行”保留未来周期的小步通过，对照为 `.r1-verification/r7-manual-step6d-cancel-once.json`。接下来对另一个仍启用的 R7 拒绝写入安排创建待确认的新执行，再从其通知选择“停止整个安排 / 周期”，检查该安排停用、当前执行取消且历史保留；停止整个周期尚未操作或判为通过。
+
+用户反馈“整个安排已停止，本次也已取消”。只读核验 R7 拒绝写入安排 enabled=0、revision=2、next_due=NULL；新执行 `3db25aaf57654a5d84e35d36739275ad` 为 cancelled，原因“用户取消安排”，session/run 为空；原 completed 拒绝执行和更早的 interrupted 历史保留。R7 两次写入任务与前一对照完全一致，仍保持启用及原未来周期；日志哈希、三个文件摘要和修改时间均未变化，仍为 19 次 fake client 输入、3 次写入。第 6 条的跨午夜静音、结束后合并提示以及三个不同取消语义均有本次人工反馈和只读证据，记为通过。完整对照为 `.r1-verification/r7-manual-step6e-stop-period.json`；A 当前有 7 项安排、14 条执行、30 条通知、5 个已结束权限请求，没有活动执行；B 尚未建立任务库，作为下一步隔离检查的起点。第 7 条将合并工作区切换、历史恢复和最终重开验收，尚未判为通过。
+
+用户反馈“B 为空，切回 A 记录正确”。只读核验 B 已建立独立任务库，任务、执行、通知和请求均为 0，尚无免打扰配置，使用默认关闭；A 仍保持启用的 22:00–08:00 Asia/Shanghai 设置。A 的任务、执行全部字段与切换前一致，计数仍为 7/14/30/5；日志行数和哈希、三个文件摘要及修改时间不变，仍为 19 次 fake client 输入、3 次写入。工作区显示隔离与设置保留小步通过，对照为 `.r1-verification/r7-manual-step7a-workspaces.json`。旧 A 命令在 B 的拒绝边界由已有自动化覆盖，本步没有声称人工强制触发过时点击。接下来恢复两次写入、拒绝、失败和未知写入的四个原会话，只查看历史，不发送新任务；历史恢复与最终退出重开仍待反馈。
+
+用户反馈“四个历史会话均可查看，没有新权限卡片”。只读核验 A 的 tasks、executions、notifications、notification_requests 全部与工作区切换后对照一致，日志行数及整体哈希、三个文件摘要及修改时间也未变；仍为 19 次 fake client 输入、3 次写入，denied.md/failed.md 仍不存在。历史恢复不重放的小步通过，证据为 `.r1-verification/r7-manual-step7b-history.json`。当前没有活动执行，剩余启用周期为 R7 两次写入、R7 失败、R7 未知写入，均到下周才再到期；两条静音提醒仍 pending。最后由用户停止这三个剩余周期，保留提醒和历史，再完全退出并用原根目录重开，核对旧权限不复活和调用/文件不变；最终重开尚待反馈。
+
+用户反馈“重开后历史正确，没有新权限卡片”。最终只读对照确认 executions、notifications、notification_requests 全部与重开前一致；唯一任务变更为用户明确停止的 R7 两次写入、R7 失败、R7 未知写入，均变为 enabled=0、revision=2、next_due=NULL。连同此前停止的拒绝写入，四个周期都已停用。A 仍为 7 项安排、14 条执行、30 条通知、5 个已结束请求；B 对应各项均为 0。静音提醒 A 仍为通知 handled/业务 pending，B 仍为通知 unread/业务 pending；免打扰设置保留。日志仍为 19 次 fake client 输入、3 次写入，整体哈希、三个已有文件摘要和修改时间完全一致，denied.md/failed.md 仍不存在。第 7 条通过，最终对照为 `.r1-verification/r7-manual-step7c-final-reopen.json`。
+
+## R7 人工验收收尾与最终回归（2026-11-24）
+
+七条 Windows 可见人工主流程已完成，验收根目录保留为 `C:\Users\28436\AppData\Local\Temp\deskmate-r7-nuguu4kp`。本节汇总最终结论；上方逐步记录和初次失败/修复过程作为原始证据保留。
+
+| 人工检查点 | 结果 | 实际覆盖与边界 |
+| --- | --- | --- |
+| 1 启动与入口 | 通过 | 独立 A/B 工作区、offline-r7 / fake、五个原始安排与通知中心 |
+| 2 一次性提醒 | 通过 | 延后持久化、完全退出重开、同一代仅一条系统提醒、完成后停止提示；单条系统气泡有人工反馈 |
+| 3 周期任务两次写入 | 通过 | 同一执行两次独立允许，两份文件 verified，完成通知定位到正确成果；两次允许均从主窗口卡片进入 |
+| 4 拒绝写入 | 通过 | deny 已落库，denied.md 不存在，无成果/拒绝文案一致；当时进入权限卡片的路径不确定，通知导航由第 5 条补验 |
+| 5 失败、未知写入与重复查看 | 通过 | 修复附属任务窗口遮挡权限卡片后人工复验；真实部分写入对应 interrupted/readback_failed/write_unverified；重复查看不重试 |
+| 6 免打扰与三个取消含义 | 通过 | 跨午夜时段通知入库无气泡，08:00 后一条汇总气泡；关闭通知保留待处理、取消一次保留周期、停止整个安排取消当前并停用未来 |
+| 7 工作区、历史与最终重开 | 通过 | B 无 A 事项，切回 A 配置/历史保持；四个历史会话恢复及最后重开无新增模型调用、写入或权限卡片 |
+
+最终仍为 **19 次离线 fake client 输入、3 次写入边界调用**。19 次包含成功、拒绝、模型失败、一次权限超时后的脚本收尾及明确重试的未知写入，不是 19 次计费 Provider 调用；3 次写入是 first.md、second.md 和明确允许后故障注入的 unknown.md。unknown.md 保留部分内容及待核对历史，没有将其标为已验证成功。两个测试提醒刻意保留待处理，用于核对“关闭通知不完成任务”；四个周期已停止。
+
+自动化与人工边界：无托盘完整路径、过时工作区命令拒绝、最小化/隐藏与两种点击入口的组合由自动化覆盖；本机真实无托盘、每次权限均出现系统气泡、原生气泡点击回调、多屏与不同缩放组合没有逐项人工验证。操作系统可能屏蔽气泡，领取后崩溃也可能丢失显示，但通知中心持久保留；完全退出期间不唤醒，权限延后不延长授权，未知写入不会自动重试。真实 Provider 质量、本地历史长期规模和 R8 分发不在本轮结论内。
+
+关键实现文件：`likecc/notifications.py` 和 `likecc/scheduling.py` 负责同库事务投影与通知状态；`likecc/desktop/controller.py` 和 `likecc/interaction.py` 负责工作区/执行/请求与真实 Future 核验；`likecc/desktop/notifications.py`、`window.py`、`application.py`、`schedules.py` 负责通知中心、导航、托盘及明确操作入口。`examples/deskmate_notifications.py` 提供隔离的可控时钟/fake client/故障演示；三个通知测试文件及生命周期测试覆盖存储、边界和正常桌面流程。使用与复验清单见 [通知说明](deskmate-notifications.md)，三项设计问题和人工缺陷经验见 [学习记录](deskmate-learning.md)。
+
+最终同一源码回归已完成，包含人工验收发现的导航修复及新增 8 个组合：R6 基线 928 项，R7 共新增 40 项，总计 968 项。本次两个最终整套均一次执行完成、无失败；此前专项中旧窗口启动等待超时的原始失败与单独复跑证据仍保留，该用例在本次整套中通过。
+
+| 最终检查 | 实际结果 | 本地证据（`.r1-verification`，未提交） |
+| --- | --- | --- |
+| WSL Ubuntu-24.04 / cc 完整离线回归 | **968 passed、0 skipped，270.85s，退出 0** | `r7-wsl-final-full.xml/log` |
+| Windows / deskmate-win 完整离线回归 | **962 passed、6 skipped，439.69s，退出 0** | `r7-win-final-full.xml/log` |
+| R7 正常桌面入口流程（包含在完整回归内） | 两平台各 **16/16**，包括新增 8 种通知导航组合 | 两份 final-full.xml 中 `test_r7_acceptance` |
+| 独立 SubAgent | 两平台各 **90/90，退出 0** | `r7-{win,wsl}-final-subagent.log` |
+| CLI、桌面、R7 演示入口帮助 | 两平台三种 `--help` 均退出 0 | `r7-{win,wsl}-final-{cli-help,desktop-help,notification-help}.log` |
+| 离线演示准备与时钟推进 | 两平台 `--check`、`--advance-minutes 10` 均退出 0 | `r7-{win,wsl}-final-{notification-prepare,notification-clock}.log` |
+| AST / 内存编译与源码一致性 | 两平台各 **207 个 Python 文件**；两份 manifest 相同且与当前源码相符 | `r7-{win,wsl}-final-manifest.json` |
+| Git 范围与空白检查 | `git diff --check` 通过；main / HEAD 仍为 R6 基线，无暂存、提交或推送 | 最终命令输出 |
+
+耗时采用 pytest 终端汇总。Windows 的六项跳过仍为五项既有 POSIX 进程组用例和一项无合适系统文件的符号链接用例，对应 WSL 用例全部运行，没有新增跳过。两平台环境版本与前述首次定稿相同。最终隔离 CWD 为 Windows `.r1-verification/r7-win-final-cwd-8ektrtuw`、WSL `/tmp/r7-wsl-final-cwd-nklentyd`；不共写数据库，也不使用人工验收根目录。两个 final-summary.json 中全部七个命令退出码为 0。
+
+最终检查的可复制命令：
+
+```powershell
+Set-Location D:\ldj\03\DeskMate-Standalone
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r7_run.py D:/ldj/03/DeskMate-Standalone win-final
+wsl.exe -d Ubuntu-24.04 --cd /mnt/d/ldj/03/DeskMate-Standalone -- /home/ldj/anaconda3/envs/cc/bin/python -s -B -X utf8 .r1-verification/r7_run.py /mnt/d/ldj/03/DeskMate-Standalone wsl-final
+```
+
+本地检查脚本位于忽略目录；不依赖该脚本的原生命令方式见上方 R7 首次定稿部分。离线可见演示启动与重开命令、可一次走完的七条清单见 [通知使用说明](deskmate-notifications.md)。所有改动保留在独立仓库工作区供复审；没有计费 Provider 调用，未开发原 DeskMate 仓库，也未开展 R8 分发。
+
+## R7 提交前复审（2026-11-24）
+
+按用户要求，仅在独立仓库复审已有 R7 工作区改动并直接修复。开始及收尾检查均保留 `main` / R6 基线 `9d1e7d426b625fd978fc2fe4ad20883fc60197a4`；未暂存、提交、推送、调用计费 Provider 或开展 R8。三名审查代理分别复核去重、请求/工作区、取消语义，主代理整合并检查异常路径。本轮不访问或变更上述人工验收根目录，所有探针、数据库及完整回归使用独立临时目录。
+
+上节七条人工验收及 968 项自动化是复审前版本的原始证据，仍保留；本节修复由新增离线自动化验证，不冒充再次进行了 Windows 可见人工验收。
+
+| 缺陷及影响 | 修复与回归 |
+| --- | --- |
+| P1：权限先放行后保存；数据库失败可导致界面报拒绝但真实写入继续，决定证据缺失 | 先检查格式/身份/Future，再同步保存决定并放行；数据库失败保持原 Future 待处理，用户明确重试后仅执行一次。允许、拒绝、补充回答三组覆盖真实工具/磁盘。纯展示刷新失败保留成功回执 |
+| P2：Future 已结束而结果事件尚未消费，仍领取过期气泡；迟到首次事件可覆盖当前卡片 | 扫描/领取前检查真实 Future，首次事件已结束则丢弃；覆盖回答/取消 × 权限/问答、迟到两种事件，也验证不误删另一条仍有效的请求 |
+| P2：切换工作区已开始而旧库尚未释放时接受旧通知命令 | 同时检查展示工作区、存储工作区和就绪状态；打开、延后、关闭、取消本次、停止周期、保存免打扰六种命令均拒绝，旧/新工作区事实不变 |
+| P2：待处理提醒漏取消按钮；关闭通知错误地禁用仍有效事项的业务取消 | UI/后端以业务有效性决定取消；handled 只禁止再次延后。提醒/模型任务 × 是否先关闭四组正常 Qt 流程，旧周期原参数与刷新后的历史参数都不能取消下一期 |
+| P2：一次气泡领取失败或初始状态拒绝后，Qt 等待令牌不释放，后续可能一直无提示 | 统一失败回执覆盖事务和初始拒绝，Qt 清除令牌并至少退避一秒；未就绪时不申请领取。真实 SQLite COMMIT 失败回滚代次/冷却，重试及重开不重复 |
+| P2：运行收尾的请求结束落库异常逃逸，界面卡在“取消中” | 纳入原收尾错误边界，清空过期卡片及运行引用并停止后续领取；明确重开后原执行为中断待核对，恢复历史不增加调用/写入 |
+
+去重存储原有 UNIQUE 事件键和事务投影未发现重复缺陷。额外测试真实 SQLite 读锁引起 COMMIT 失败、恢复后重放相同 PermissionRequest 五次；均无新增通知、无授权复活。没有增加调度器、事件消费者或后台自动工具重放。
+
+针对性红/绿证据（均在忽略目录 `.r1-verification`）：
+
+| 检查 | 实际结果与证据 |
+| --- | --- |
+| 去重、回滚与恢复事件重放 | **21 passed，13.46s**；`r7-review-dedupe-regressions.xml`；另有独立事务探针 `r7-review-dedupe-probe.json` |
+| 请求有效性与切换过渡期 | 修复前 **10 failed / 1 passed**，补迟到事件后 **13 passed，15.53s**；`r7-request-review-{red,green}.xml` |
+| 权限保存与刷新故障 | 修复前 **4 failed / 1 passed**；加入上述请求用例后的模块 **18 passed，21.93s**；`r7-reply-review-red.xml`、`r7-request-review-final.xml` |
+| 运行收尾故障 | 新回归修复前 **1 failed**；修复后连同原终态保存故障用例 **2 passed，14.95s**；`r7-terminal-review-{red,green}.xml` |
+| 正常桌面取消与旧周期重放 | 四组取消用例修复前 **3 failed / 1 passed**；完整入口验收模块最终 **19 passed，39.24s**；`r7-review-cancel-all-red.xml`、`r7-review-cancel-stale-final.xml` |
+| 气泡事务失败与守卫拒绝 | 临时领取故障修复前 **1 failed**；初始拒绝修复前 **2 failed**（本轮命令输出，无单独 JUnit）；最终通知模块及领取重试共 **6 passed，13.99s**；`r7-review-alert-red.xml`、`r7-alert-guard-green.xml` |
+| 桌面交互/生命周期交叉检查 | **22 passed，44.82s**；`r7-review-desktop.xml`，后续完整回归再覆盖最终源码 |
+
+已有原始失败报告保留。取消用例追加下一期重放时，曾误用扫描前的 next_due 作为比较基准；修正为下一期生成后的快照后通过，未因此改动生产代码。没有跳过或删除失败用例来取得通过。
+
+修复后同一源码的双平台完整检查均一次完成。本轮相对上节新增 **27 项**回归，总计 **995 项**；`test_r7_request_review.py` 为 19 项，正常 Qt 入口 `test_r7_acceptance.py` 为 19 项。
+
+| 最终检查 | 实际结果 | 本地证据（`.r1-verification`，未提交） |
+| --- | --- | --- |
+| WSL Ubuntu-24.04 / cc 完整离线回归 | **995 passed、0 skipped，235.07s，退出 0** | `r7-wsl-review-full.xml/log` |
+| Windows / deskmate-win 完整离线回归 | **989 passed、6 skipped，383.96s，退出 0** | `r7-win-review-full.xml/log` |
+| 独立 SubAgent | 两平台各 **90/90，退出 0** | `r7-{win,wsl}-review-subagent.log` |
+| CLI、桌面、R7 演示入口帮助 | 两平台三种 `--help` 均退出 0 | `r7-{win,wsl}-review-{cli-help,desktop-help,notification-help}.log` |
+| 离线演示准备与时钟推进 | 两平台 `--check`、`--advance-minutes 10` 均退出 0 | `r7-{win,wsl}-review-{notification-prepare,notification-clock}.log` |
+| AST / 内存编译及源码一致性 | 两平台各 **208 个 Python 文件**；manifest 完全一致且匹配当前源码 | `r7-{win,wsl}-review-manifest.json` |
+| 工作区检查 | `git diff --check` 通过；main / R6 HEAD 不变，暂存区为空 | 最终检查输出与 `r7-review-audit.json` |
+
+耗时采用 pytest 终端汇总。Windows 六项跳过仍为五项既有 POSIX 进程组用例和一项无合适系统文件的符号链接用例，WSL 全部运行，没有新增跳过。Windows 为 Python 3.12.7 / SQLite 3.54.1，WSL 为 Python 3.11.16 / SQLite 3.53.4；两边 PySide6 均为 6.8.3。
+
+隔离 CWD：Windows `.r1-verification/r7-win-review-cwd-uohmwky4`；WSL `/tmp/r7-wsl-review-cwd-d5n5gf04`。两个 review-summary.json 内的七个命令退出码均为 0。规范化 manifest 的 SHA-256 为 `5b449f5e59ab55a4ff59919e7b22daa577df63ad765bb1d57e55e12b9ea777d6`。
+
+复跑本轮检查可使用上节同一脚本，将末尾后缀分别改为 `win-review` 和 `wsl-review`。不依赖忽略目录脚本的完整命令、可见离线演示与七条人工清单仍见前文及[通知说明](deskmate-notifications.md)。本次没有新增 Windows 原生气泡可见性结论，原生托盘/多屏限制保持；每代最多领取一次不等于操作系统保证显示一次。工作区已包含修复、回归及通知说明/路线/学习记录更新，未提交推送或开展 R8。
+
+## R7 授权发布前检查（2026-11-24，因回归失败暂停）
+
+用户随后明确授权正常提交、推送至 `KNIGHT15235/DeskMate` 的 `main` 及导出固定 SHA ZIP；同时要求“如果必要回归失败，停止提交并报告”。本节为该次新执行的结果，不沿用上一节通过数字。本次 Windows 完整回归有一项失败，因此没有暂存、创建 Commit、推送或导出 R7 ZIP，尚无 R7 SHA；没有用复跑覆盖失败、修改断言或扩大跳过范围。
+
+Git 初始检查：实际目录 `D:\ldj\03\DeskMate-Standalone`；分支 `main`，HEAD 为 `9d1e7d426b625fd978fc2fe4ad20883fc60197a4`；R6 基线在历史中，origin 为 `https://github.com/KNIGHT15235/DeskMate.git`。暂存区为空，无 merge/rebase/cherry-pick/revert/sequencer 或 index.lock。首次 `git fetch origin` 成功，`origin/main...HEAD` 左右计数 **0/0**；无异常历史。未修改其他仓库或使用强制推送/历史重写。
+
+停止提交后再次执行 `git ls-remote origin refs/heads/main`，远程 SHA 仍为上述 R6 基线，与本地 HEAD 一致；工作区保留 23 个 R7 候选文件，暂存区为空。该一致性表示尚未发布新版本，不代表 R7 已推送。
+
+只读审查确认 8 个生产文件、5 个测试文件和 1 个离线演示属于 R7，R1–R6 契约未发现新的破坏。候选文件与已跟踪路径没有真实配置、数据库、日志、截图或 `.r1-verification` 产物；候选正文未发现真实凭据，api_key 字面量为离线占位值；18 项代表性配置/缓存/SQLite 附属文件路径均被忽略。文档中的 fake 人工验收元数据按说明保留，不访问该人工根目录。
+
+本次只补充文档：README 增加已实现 R7 的简介、通知入口与离线演示命令；同步目标规格、路线和通知说明的过时状态。源码和测试未变，候选总计 **23 个文件（15 修改、8 新增）**；清单保存在忽略目录 `r7-publish-files.json`。Python 源码清单与上一节复审版本一致。
+
+本次实际执行的主命令：
+
+```powershell
+Set-Location D:\ldj\03\DeskMate-Standalone
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r7_run.py D:/ldj/03/DeskMate-Standalone win-publish
+wsl.exe -d Ubuntu-24.04 --cd /mnt/d/ldj/03/DeskMate-Standalone -- /home/ldj/anaconda3/envs/cc/bin/python -s -B -X utf8 .r1-verification/r7_run.py /mnt/d/ldj/03/DeskMate-Standalone wsl-publish
+$env:UV_PYTHON_DOWNLOADS = 'never'
+$env:UV_CACHE_DIR = 'D:\ldj\03\DeskMate-Standalone\.r1-verification\uv-publish-cache'
+& C:\Users\28436\.local\bin\uv.exe lock --check --offline --python C:\Users\28436\.conda\envs\deskmate-win\python.exe
+```
+
+脚本在两个独立临时 CWD 中分别执行 `python -s -B -X utf8 -m pytest -q -ra -p no:cacheprovider`，指定仓库的 `pyproject.toml`、`--rootdir`、绝对 tests 路径、独立 `--basetemp` 和 JUnit；设置 `QT_QPA_PLATFORM=offscreen`、`PYTHONDONTWRITEBYTECODE=1` 和仓库/tests 的 `PYTHONPATH`。同一脚本还分别执行 `tests/verify_subagent.py`，`-m likecc --help`、`-m likecc.desktop --help`、`-m examples.deskmate_notifications --help`，以及独立根目录下的演示 `--check` 和 `--advance-minutes 10`。本机脚本与原始报告均不提交。
+
+| 本次检查 | 实际结果 | 忽略目录 `.r1-verification` 中的证据 |
+| --- | --- | --- |
+| WSL Ubuntu-24.04 / cc 完整离线回归 | **995 passed，288.79s，退出 0** | `r7-wsl-publish-full.xml/log` |
+| Windows / deskmate-win 完整离线回归 | **1 failed、988 passed、6 skipped，338.00s，退出 1** | `r7-win-publish-full.xml/log` |
+| 独立 SubAgent | 两平台各 **90/90，退出 0** | `r7-{win,wsl}-publish-subagent.log` |
+| CLI、桌面与 R7 演示帮助 | 两平台三个入口均退出 0 | `r7-{win,wsl}-publish-*-help.log` |
+| 离线演示准备与推进时钟 | 两平台 `--check`、`--advance-minutes 10` 均退出 0 | `r7-{win,wsl}-publish-notification-{prepare,clock}.log` |
+| Python AST / 内存编译 | 两平台各 **208 文件**；两份 manifest 与当前源码相同 | `r7-{win,wsl}-publish-manifest.json` |
+| 依赖锁一致性 | uv 0.11.8 离线 `lock --check` 通过，解析 **58 packages**；pyproject.toml、uv.lock 与 HEAD 一致 | 本轮命令输出 |
+| Git 空白与工作区 | `git diff --check` 通过，暂存区为空，HEAD 不变 | `r7-publish-blocked-audit.json` 与本轮输出 |
+
+唯一失败是 `tests/test_schedule_window.py::test_scheduled_r4_question_permission_cards_preserve_draft`：问答和允许按钮已点击，但在第 84 行等待控制器变为 idle 且执行变为 completed 时超过现有 **6 秒**限制，抛出 `Qt condition timed out`。目前证据只证明完成条件未在时限内被观察到，不能直接判定为无害的时序抖动，也不能声称草稿丢失；根因仍待定位。本次遵循发布失败即停的要求，没有修改业务代码/测试或重跑掩盖失败。
+
+Windows 的六项跳过仍是五项既有 POSIX 进程组用例和一项无适合系统文件的符号链接用例；WSL 全部运行。两平台 Python/SQLite/PySide6 版本与上一节相同。隔离 CWD 为 Windows `.r1-verification/r7-win-publish-cwd-07fuukyi` 和 WSL `/tmp/r7-wsl-publish-cwd-yqftpyo8`。
+
+验证边界：本次 Qt 自动化使用 offscreen 和模拟托盘，不是新的 Windows 可见人工或真实系统托盘验收；此前七条可见主流程、单条及汇总气泡观察保留为历史证据。真实无托盘、所有窗口/缩放/多屏组合、原生气泡点击回调未补验；本次没有真实 Provider 调用或 R7 质量验收。修复/解释该回归并重新满足发布检查之前，不生成 R7 提交链接、R6→R7 对比链接或固定 ZIP；未创建 Release，未进入 R8。
+
+## R7 等待器修复与重新发布验证（2026-11-24）
+
+用户明确要求继续修复上述问题，并在修复后完成 Git 推送；固定 SHA 源码 ZIP 仍按此前授权流程执行。本节承接上节真实失败，不删除或改写首次发布检查结果。
+
+失败的隔离工作区只读核对：问答和写入决定均已保存，分别为 answered/allow，两请求均结束；目标文件存在，artifact 为 verified，按 R4 换行规范化后的摘要与文件相同，没有工具错误，执行最终为 completed。会话中真实回读成功时间为 UTC 06:16:57.585854，运行完成为 06:16:57.883585；execution 的 started_at/ended_at 是模拟时钟，不能用于推断真实耗时。完整报告只有 call 阶段的 Qt 超时，没有 teardown 关闭失败。由于收尾先保存 completed，再关闭资源并发布 idle，这些证据不能还原超时当刻的界面状态。
+
+另用隔离 Qt 探针排除了旧控件假设：`takeWidget()` 已解除旧卡片父子关系，尚未执行 deleteLater 时，findChild 已不能命中旧按钮。原用例单项动态审计 **1 passed，6.45s**；answer/allow 点击时均 enabled/visible，两条回复都有命令 ID 和成功回执，allow 到 idle/completed 约 2.47 秒。该单项通过只用于诊断，不替代上节失败的完整回归；证据为 `.r1-verification/r7-click-audit.log/.xml`。
+
+可重复验证的缺陷在共享测试等待器：`QTest.qWait(10)` 可推进 Qt 事件，但在 Windows PySide6 下不保证让出 GIL 给后台 Python 线程。微型探针将自动切换间隔设为一秒，由 Qt singleShot 打开后台线程 gate，保持同样 0.25 秒时限：旧循环连续三次超时，Qt gate 已打开但 worker 未完成；增加 `time.sleep(0.001)` 后连续三次通过，约 15–31 毫秒。脚本为忽略目录 `r7_qwait_gil_probe.py`，数字来自本轮探针输出。此实验隔离了模型和数据库耗时，证明等待器本身缺少调度保证；因原失败没有即时线程栈，不将它夸大为还原当时每一步的唯一原因证明。
+
+修复仅落在 `tests/test_desktop_window.py`：共享 spin 每轮处理 Qt 后显式让出线程；原默认 **6 秒**时限、失败逻辑、原业务断言及跳过条件完全不变。新增 `test_spin_advances_qt_events_and_background_python` 验证同一等待中 Qt 事件和后台线程都推进；finally 恢复解释器切换间隔并释放/回收线程。生产代码未作额外修改。
+
+| 针对性检查 | 实际结果 | 忽略目录证据 |
+| --- | --- | --- |
+| 新行为回归 + 旧共享等待器 | **1 failed，16.43s**，后台线程完成条件超时 | `r7-qt-wait-red.xml/log` |
+| 修复后两个完整窗口测试模块 | **12 passed，18.90s**，包括新回归及原失败用例 | `r7-qt-wait-green.xml/log` |
+| 测试改动独立复审 | 原时限、断言、skip/xfail 未改变，线程及全局间隔有 finally 清理 | 本轮只读审查输出 |
+
+专项命令：在既有 deskmate-win 解释器中设置 `QT_QPA_PLATFORM=offscreen`、仓库和 tests 的 `PYTHONPATH`，执行 `python -s -B -X utf8 -m pytest -q -p no:cacheprovider tests/test_desktop_window.py tests/test_schedule_window.py --junitxml=.r1-verification/r7-qt-wait-green.xml`。首次红回归只选新行为用例，在修改共享 spin 前执行；两份原始报告均保留。
+
+修复后首次双平台并行全量（独立目录、不共写数据库）：WSL **996 passed，171.56s**；Windows **1 failed、989 passed、6 skipped，245.38s**。原 Qt 用例和新增调度回归在两平台均通过：原 Qt 用例 Windows 1.512s / WSL 0.826s，新回归 Windows 0.028s / WSL 0.013s。报告为 `r7-{win,wsl}-release-full.xml/log`。
+
+Windows 此次唯一失败变为既有 `test_session_service.py::test_offline_demo_runs_when_all_textual_imports_are_blocked`：整个子进程（含首次依赖导入）的原 **20 秒**门限超时。只执行一次同入口仪器化诊断，保留 NoTextual 与 20 秒门限，加 importtime、每五秒 faulthandler 及阶段时间戳：总 **6.874s** 正常退出，RuntimeExtensions 首次导入 **6.345s**，实际演示 **0.232s**，确认 `repeated_resume_unchanged=True`。五秒线程栈位于 importlib.get_data / openai.types 模块加载，尚未进入演示。证据为 `r7-textual-probe-summary.json` 和对应 stdout/stderr 日志。
+
+诊断证明本次导入成本占主导，但未复现 20 秒超时，不能确定先前失败的唯一原因。没有修改该测试或放宽时限；后续保持相同源码，在 WSL 全部结束后单独执行 Windows 完整检查，作为隔离并行资源影响的对照。中间失败报告原样保留，不用专项通过冒充完整通过。
+
+最终同一源码完整验证通过。Windows 串行全量中，原 Qt 用例 **1.392s**、新增调度回归 **0.020s**、NoTextual 子进程用例 **8.183s**，均满足未修改的时限。串行通过不证明前一次子进程超时的唯一原因；这项未稳定复现的并行运行波动作为已知限制保留。
+
+| 最终发布前检查 | 本次实际结果 | 本地证据（`.r1-verification`，不提交） |
+| --- | --- | --- |
+| WSL Ubuntu-24.04 / cc 完整离线回归 | **996 passed、0 skipped，171.56s，退出 0** | `r7-wsl-release-full.xml/log` |
+| Windows / deskmate-win 串行完整离线回归 | **990 passed、6 skipped，190.75s，退出 0** | `r7-win-serial-full.xml/log` |
+| 独立 SubAgent | 两平台各 **90/90，退出 0** | `r7-{wsl-release,win-serial}-subagent.log` |
+| CLI、桌面、R7 演示帮助 | 两平台三个入口均退出 0 | 两份 summary.json 及对应 help 日志 |
+| 离线演示准备、推进时钟 | 两平台 `--check`、`--advance-minutes 10` 均退出 0 | 两份 summary.json 及对应 notification 日志 |
+| Python AST / 内存编译 | 两平台各 **208 个文件**；manifest 完全相同并匹配当前源码 | `r7-{wsl-release,win-serial}-manifest.json` |
+| 依赖锁一致性 | `uv lock --check --offline` 解析 **58 packages**，退出 0；依赖文件未变 | 本轮命令输出 |
+| 发布候选审查 | **24 个明确列出的源码/测试/演示/文档文件**；无真实凭据、数据库、个人配置或本机验证产物 | `r7-release-files.json`、`r7-release-audit.json` |
+| Git 空白检查 | 工作区与暂存后的 `git diff --check` 均须通过，R6 历史保留，正常快进推送 | 本轮 Git 输出及发布审计 |
+
+本次最终完整检查命令如下；脚本使用上节说明的隔离 CWD、offscreen、fake client 及模拟托盘，内部命令/版本不变。WSL 通过后源码未再改变，Windows 单独完成最终对照；不是将先前 Windows 失败数量改写为通过。
+
+```powershell
+Set-Location D:\ldj\03\DeskMate-Standalone
+wsl.exe -d Ubuntu-24.04 --cd /mnt/d/ldj/03/DeskMate-Standalone -- /home/ldj/anaconda3/envs/cc/bin/python -s -B -X utf8 .r1-verification/r7_run.py /mnt/d/ldj/03/DeskMate-Standalone wsl-release
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r7_run.py D:/ldj/03/DeskMate-Standalone win-serial
+```
+
+源码 manifest 的规范化 SHA-256 为 `7a81cc4256655d2c199b4b25782ee135dc74450e2621910dec823f65af847fa2`。最终隔离目录为 WSL `/tmp/r7-wsl-release-cwd-qywaraxp`、Windows `.r1-verification/r7-win-serial-cwd-baz6sr9v`。Python、SQLite、PySide6 版本与上一节相同；Windows 六项跳过仍是既有平台/系统文件条件，没有新增 skip 或 xfail。
+
+发布边界保持：此前七条 Windows 可见主流程是历史人工证据，本次是 Qt offscreen/模拟托盘自动化；真实无托盘、原生气泡点击回调、多屏/缩放组合及 R7 真实 Provider 质量未补验。系统气泡仍可能被屏蔽或在领取后崩溃时丢失，通知中心持久保留；完全退出不后台唤醒，通知不恢复旧授权或自动重试未知写入。本节记录提交前验证；实际 Commit、远程 SHA、固定 ZIP 与工作区状态由提交推送后的 Git/归档审计报告给出，不提前虚构 SHA。未开发 R8，也不创建 GitHub Release。

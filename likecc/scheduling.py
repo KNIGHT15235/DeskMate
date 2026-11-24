@@ -200,6 +200,8 @@ class ScheduleStore:
                 raise ValueError("任务库属于另一工作区；不能复制数据库来迁移授权")
             if not row:
                 self.db.execute("INSERT INTO metadata VALUES (?)", (self.workspace,))
+            from likecc.notifications import NotificationLedger
+            self.notifications = NotificationLedger(self)
             self.recover()
         except BaseException:
             self.close()
@@ -218,6 +220,7 @@ class ScheduleStore:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             yield
+            self.notifications.reconcile()
             self.db.execute("COMMIT")
         except BaseException:
             self.db.execute("ROLLBACK")
@@ -226,6 +229,7 @@ class ScheduleStore:
     def recover(self):
         # Even a claimed-but-not-started occurrence requires an explicit choice.
         with self.transaction():
+            self.notifications.recover()
             self.db.execute("""UPDATE executions SET status='interrupted', ended_at=?,
                 reason=reason || '；上次进程退出/中断。请查看会话、成果和磁盘后明确重试，系统不自动重放。'
                 WHERE status IN ('queued','awaiting_model','running','waiting')""", (stamp(self.clock()),))
@@ -320,8 +324,9 @@ class ScheduleStore:
             raise ValueError("无效执行字段")
         if "evidence" in values:
             values["evidence"] = json.dumps(values["evidence"], ensure_ascii=False)
-        self.db.execute("UPDATE executions SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?",
-            (*values.values(), execution_id))
+        with self.transaction():
+            self.db.execute("UPDATE executions SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?",
+                (*values.values(), execution_id))
 
     def start(self, execution_id):
         with self.transaction():
@@ -338,12 +343,22 @@ class ScheduleStore:
         return changed == 1
 
     def approve_model(self, execution_id):
-        self.db.execute("UPDATE executions SET status='queued', reason='用户允许本次模型调用' WHERE id=? AND status='awaiting_model'",
-            (execution_id,))
+        with self.transaction():
+            self.db.execute("UPDATE executions SET status='queued', reason='用户允许本次模型调用' WHERE id=? AND status='awaiting_model'",
+                (execution_id,))
 
     def complete_reminder(self, execution_id):
-        self.db.execute("UPDATE executions SET status='done', ended_at=? WHERE id=? AND status='pending'",
-            (stamp(self.clock()), execution_id))
+        with self.transaction():
+            self.db.execute("UPDATE executions SET status='done', ended_at=? WHERE id=? AND status='pending'",
+                (stamp(self.clock()), execution_id))
+
+    def cancel_execution(self, execution_id):
+        """Cancel one unstarted occurrence without disabling the recurrence."""
+        with self.transaction():
+            changed = self.db.execute("""UPDATE executions SET status='cancelled', ended_at=?, reason='用户取消本次执行；未来周期保持'
+                WHERE id=? AND status IN ('queued','awaiting_model','pending','blocked_review')""",
+                (stamp(self.clock()), execution_id)).rowcount
+        return bool(changed)
 
     def retry(self, execution_id):
         old = self.execution(execution_id)

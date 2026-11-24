@@ -1,6 +1,6 @@
 # DeskMate（桌伴）
 
-DeskMate（桌伴）是一个 Python 桌面助手实验项目，支持资料整理、个人提醒、持久任务、执行历史与可管理的工作区记忆，并保留终端编程助手入口。主动通知、稍后提醒与继续处理留在 R7。
+DeskMate（桌伴）是一个 Python 桌面助手实验项目，支持资料整理、个人提醒、持久任务、执行历史、可管理的工作区记忆及事件驱动通知，并保留终端编程助手入口。通知中心支持继续处理、稍后提醒和免打扰。
 
 项目从 [LikeCC](https://github.com/KNIGHT15235/likecc) 0.2.0 演进而来，保留原 MIT 许可证和完整开发历史：[初始基线](https://github.com/KNIGHT15235/likecc/commit/4a9b77d281646385bf48fd85b8a03c4d28bbee23)、[R4 基线](https://github.com/KNIGHT15235/likecc/commit/0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a)。当前独立仓库为 [KNIGHT15235/DeskMate](https://github.com/KNIGHT15235/DeskMate)，默认开发分支为 `main`；历史文档中的原仓库固定提交链接继续保留。
 
@@ -11,6 +11,8 @@ R5 增加一次性提醒、每周资料任务、SQLite 执行历史及中断恢�
 本项目为独立学习实践，与 Anthropic 无官方关联，也不声称复现 Claude Code 的完整内部实现。
 
 R6 增加需用户确认的偏好、项目事实与事务关联，按当前请求本地召回并展示来源，支持修改和删除。不同工作区及定时任务保持隔离；历史不会因恢复而重做工具或重新保存记忆。[使用说明与一遍走完的离线桌面清单](docs/deskmate-memory.md)。
+
+R7 将到期、权限/问答、完成、失败和中断事件保存为关联具体执行的通知，支持持久延后、跨午夜免打扰及重复事件去重。查看通知不批准权限；关闭提醒、取消本次执行和停止周期分别处理。七条 Windows 可见主流程与双平台离线回归已有记录，真实 Provider 的 R7 验收仍未开展。[通知使用说明、离线演示与可见桌面清单](docs/deskmate-notifications.md)。
 
 ## 能力
 
@@ -46,6 +48,8 @@ uv run --locked --extra desktop python -m likecc.desktop --work-dir /absolute/pr
 ```
 
 已在 Conda `cc` 安装锁定依赖时，可直接运行 `python -m likecc.desktop --demo` 或 `python -m likecc.desktop --work-dir /absolute/workspace`。安装本项目后也可使用 `deskmate` 命令。
+
+已安装桌面依赖时，在源码根目录运行 `python -m examples.deskmate_notifications` 可启动 R7 离线通知演示，使用临时 A/B 工作区、fake client 和可推进的时钟。打印的根目录可用于退出重开；操作步骤见[通知说明](docs/deskmate-notifications.md)。
 
 演示使用临时工作区与独立用户数据根，不读取真实凭据。真实模式使用选定工作区配置，权限默认 `default`；Skills、MCP、Hooks 和摘要须分别显式启用。R6 桌面默认使用需确认的工作区记忆，`--memory` 不再启用旧 Markdown 自动提取。桌面当前禁用委派/团队/Worktree/计划模式工具。已有 WSLg 启动和原生 Windows 桌面人工验收记录；R5 的提醒、任务历史、窗口恢复与真实模型主流程覆盖见下表，不代表所有平台和显示器配置均已验收。安装、生命周期与验收步骤见 [桌面说明](docs/deskmate-desktop.md)。
 
@@ -126,7 +130,7 @@ R5 当前验收状态（2026-11-22）：
 - 已验证用例以本地 fake 模型、临时文件和临时 Git 仓库为主，不代表真实模型服务、所有操作系统或外部 MCP 服务都已验证。
 - TUI 与 `-p` 共用核心 Agent 能力；`-p` 尚未装配 TUI 的 Memory、Session、Skill 与 MCP 全套管理器。
 - Hook 的 `agent` 执行器、插件来源的 Agent 加载尚未实现。
-- R5 持久调度已实现，支持范围和恢复策略见[任务说明](docs/deskmate-schedules.md)；R6 工作区记忆已实现，支持范围和离线验收见[记忆说明](docs/deskmate-memory.md)。主动通知仍在规划中。R4 首版资料模式的格式、来源、网络和平台边界见[验收说明](docs/deskmate-affairs.md)。
+- R5 持久调度、R6 工作区记忆及 R7 事件通知已实现，支持范围分别见[任务说明](docs/deskmate-schedules.md)、[记忆说明](docs/deskmate-memory.md)及[通知说明](docs/deskmate-notifications.md)。进程完全退出期间不后台唤醒；系统气泡可能被操作系统屏蔽，持久通知中心仍可查看。R4 首版资料模式的格式、来源、网络和平台边界见[验收说明](docs/deskmate-affairs.md)。
 - Fork 保留可复用的请求前缀；实际缓存命中取决于服务端、模型和请求内容，不承诺固定命中率。
 - 子 Agent 的报告格式由提示词约束；Worktree 提供工作目录隔离，权限检查不等同于操作系统级安全沙箱。
 - 本仓库版本仅包含源码、测试与示例，不包含开发阶段的审计备份、运行日志或个人配置。

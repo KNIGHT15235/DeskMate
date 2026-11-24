@@ -3,6 +3,7 @@ import signal
 import logging
 import sys
 import time
+import uuid
 
 from PySide6.QtCore import QObject, QTimer, QEvent, Qt
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction
@@ -13,6 +14,7 @@ from .window import ChatWindow
 
 log = logging.getLogger(__name__)
 FALLBACK_SHUTDOWN_TIMEOUT = 5.0
+ALERT_RETRY_SECONDS = 1.0
 
 
 def application_icon():
@@ -46,7 +48,8 @@ class DesktopApplication(QObject):
         self.tray = None
         self.tray_available = False
         self._first_hide = True
-        self._notified = None
+        self._alert_request = self._alert_seen = self._alert_workspace = None
+        self._alert_retry_at = 0.0
         self._closing_since = None
         self._quit_sent = False
         self._shutdown_warned = False
@@ -62,8 +65,8 @@ class DesktopApplication(QObject):
             self.timer.setInterval(100)
             self.timer.timeout.connect(self.poll)
             self.timer.start()
-            self.poll()
             self.window.show()
+            self.poll()
             QTimer.singleShot(0, self, self._fit_window)
         except BaseException as exc:
             try:
@@ -77,17 +80,25 @@ class DesktopApplication(QObject):
         menu = QMenu()
         self.show_action = QAction("显示 DeskMate", menu)
         self.show_action.triggered.connect(self.show_window)
+        notifications = QAction("通知中心", menu)
+        notifications.triggered.connect(self.show_notifications)
         cancel = QAction("取消当前请求", menu)
         cancel.triggered.connect(lambda: self.controller.submit("cancel"))
         leave = QAction("退出应用", menu)
         leave.triggered.connect(self.request_exit)
-        for action in (self.show_action, cancel, leave):
+        for action in (self.show_action, notifications, cancel, leave):
             menu.addAction(action)
         self.tray_menu = menu
         self.tray.setContextMenu(menu)
         self.tray.setToolTip("DeskMate 桌伴")
         self.tray.activated.connect(self._tray_activated)
+        self.tray.messageClicked.connect(self.show_notifications)
         self.tray.show()
+
+    def show_notifications(self):
+        # Native platforms do not reliably identify which balloon was clicked.
+        self.show_window()
+        self.window.show_notifications()
 
     def _tray_activated(self, reason):
         if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
@@ -142,7 +153,6 @@ class DesktopApplication(QObject):
                 self._first_hide = False
                 message = "窗口将隐藏到托盘，当前请求继续执行。可从托盘显示窗口或退出应用。"
                 self.window.feedback.setText(message)
-                self.tray.showMessage("DeskMate 继续运行", message)
             self.window.hide()
         else:
             if self._dialog is not None:
@@ -195,13 +205,37 @@ class DesktopApplication(QObject):
         self.tray_available = available
         snapshot = self.controller.snapshot()
         pending = snapshot["pending"]
-        request_id = pending[0]["request_id"] if pending else None
+        workspace = snapshot["workspace"]
+        if workspace != self._alert_workspace:
+            self._alert_workspace = workspace
+            self._alert_request = self._alert_seen = None
+            self._alert_retry_at = 0.0
+        background = not self.window.isVisible() or self.window.isMinimized()
         if self.tray:
             self.show_action.setText("显示 DeskMate · 待处理回复" if pending else "显示 DeskMate")
             self.tray.setToolTip("DeskMate · 等待你的回复" if pending else "DeskMate 桌伴")
-            if pending and request_id != self._notified and not self.window.isVisible():
-                self.tray.showMessage("DeskMate 等待回复", "请显示窗口处理权限或问答；未自动批准。")
-                self._notified = request_id
+        alert = snapshot.get("notification_alert")
+        if alert and alert["workspace"] == workspace and alert["request_token"] != self._alert_seen:
+            self._alert_seen = alert["request_token"]
+            self._alert_request = None
+            if alert.get("failed"):
+                self._alert_retry_at = time.monotonic() + ALERT_RETRY_SECONDS
+            delivery = alert["delivery"]
+            current = {n["id"]: n for n in snapshot.get("notifications", [])}
+            valid = [item for item in delivery["items"] if item["id"] in current
+                and current[item["id"]]["valid"] and current[item["id"]]["state"] not in {"handled", "snoozed"}
+                and current[item["id"]]["generation"] == item["generation"]] if delivery else []
+            if (valid and available and background and not self.is_closing
+                    and not snapshot.get("notification_quiet")):
+                title, body = (delivery["title"], delivery["body"]) if len(valid) == len(delivery["items"]) else (
+                    "DeskMate · 待处理事项", "事项状态已更新，请打开通知中心查看。")
+                self.tray.showMessage(title, body)
+        if (available and background and workspace and snapshot.get("notification_due")
+                and snapshot["state"] not in {"starting", "error", "closing", "closed"}
+                and not self.is_closing and not self._alert_request
+                and time.monotonic() >= self._alert_retry_at):
+            self._alert_request = uuid.uuid4().hex
+            self.controller.submit("notification_alert", workspace=workspace, request_token=self._alert_request)
         if self._closing_since is not None:
             if not self.controller.is_alive:
                 self.timer.stop()

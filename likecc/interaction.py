@@ -69,6 +69,11 @@ class Interaction:
         future.set_result(value)
         return True
 
+    def is_pending(self, request_id: str) -> bool:
+        """Read-only liveness check; navigation must never answer the future."""
+        pending = self._pending.get(request_id)
+        return bool(not self._closed and pending and not pending[1].done())
+
     async def wait(self, request_id: str) -> Any:
         _, future = self._pending[request_id]
         try:

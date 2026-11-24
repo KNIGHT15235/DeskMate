@@ -2,6 +2,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import socket
+import sys
 import threading
 import time
 from contextvars import ContextVar
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 pytest.importorskip("PySide6", reason="install the optional desktop extra for GUI tests")
 from PySide6.QtWidgets import QApplication, QPushButton, QComboBox, QLineEdit
+from PySide6.QtCore import QTimer
 from PySide6.QtTest import QTest
 
 from likecc.desktop.controller import DesktopController, DesktopOptions
@@ -27,7 +29,35 @@ def spin(predicate, timeout=6):
         if predicate():
             return
         QTest.qWait(10)
+        # Pumping Qt alone can monopolize the GIL in PySide on Windows. Let
+        # the real asyncio worker advance as it would under QApplication.exec.
+        time.sleep(0.001)
     raise AssertionError("Qt condition timed out")
+
+
+def test_spin_advances_qt_events_and_background_python(qtapp):
+    ready, gate, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def worker():
+        ready.set()
+        gate.wait()
+        finished.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    interval = sys.getswitchinterval()
+    try:
+        assert ready.wait(1)
+        # Make incidental interpreter switching unavailable within the deadline:
+        # the Qt wait must explicitly give the Python worker a chance to run.
+        sys.setswitchinterval(2)
+        QTimer.singleShot(0, gate.set)
+        spin(lambda: gate.is_set() and finished.is_set(), timeout=0.5)
+    finally:
+        sys.setswitchinterval(interval)
+        gate.set()
+        thread.join(timeout=1)
+    assert not thread.is_alive()
 
 
 @pytest.fixture

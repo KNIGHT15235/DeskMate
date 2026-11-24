@@ -199,6 +199,12 @@ class ScheduleWindow(QDialog):
             self.reviewed.setChecked(False)
         self.show_details()
 
+    def focus_execution(self, task_id, execution_id):
+        self.refresh()
+        self.tasks.setCurrentIndex(self.tasks.findData(task_id))
+        self.executions.setCurrentIndex(self.executions.findData(execution_id))
+        self.show_details()
+
     def show_details(self):
         if self._reviewed_execution_id != self.executions.currentData():
             self.reviewed.setChecked(False)
@@ -214,7 +220,7 @@ class ScheduleWindow(QDialog):
         evidence = row["evidence"]
         output_names = {"written": "已写入，未回读", "verified": "已回读核对", "readback_failed": "回读失败", "write_unverified": "可能写入，待核对"}
         artifacts = "\n".join(f"{a['path']}：{output_names.get(a['status'], a['status'])}" for a in evidence.get("artifacts", []))
-        self.details.setPlainText(f"{row['label']}\n{row['reason']}\n开始：{row['started_at'] or '尚未开始'}\n结束：{row['ended_at'] or '尚未结束'}\n"
+        self.details.setPlainText(f"{row['label']}\n{row['reason']}\n任务：{row['task_id']}\n本次执行：{row['id']}\n开始：{row['started_at'] or '尚未开始'}\n结束：{row['ended_at'] or '尚未结束'}\n"
             f"核对记录：{row['reviewed_at'] or '尚未核对'}\n"
             f"会话：{row['session_id'] or '无'}\n运行：{row['run_id'] or '无'}\n成果：\n{artifacts or '没有已写入成果'}\n\n"
             + describe_spec(row["snapshot"], row["snapshot"]["workspace"]) + "\n\n本次资料与工具证据：\n" + json.dumps(evidence, ensure_ascii=False, indent=2))

@@ -14,6 +14,7 @@ from test_desktop_window import spin
 
 class FakeTray(QObject):
     activated = Signal(object)
+    messageClicked = Signal()
     def __init__(self, icon, parent):
         super().__init__(parent)
         self.messages = []
@@ -28,6 +29,25 @@ class FakeTray(QObject):
         self.visible = False
     def showMessage(self, title, message):
         self.messages.append((title, message))
+
+
+@pytest.mark.parametrize("presentation", ["minimized", "hidden"])
+def test_background_permission_notifies_once(lifecycle, presentation):
+    """R7-0: Qt considers a minimized window visible; it still needs a hint."""
+    owner, c, _, _ = lifecycle
+    if presentation == "minimized":
+        owner.window.showMinimized()
+        assert owner.window.isVisible() and owner.window.isMinimized()
+    else:
+        owner.window.hide()
+    c.submit("send", text="R7 permission notification")
+    spin(lambda: bool(c.snapshot()["pending"]))
+    owner.poll()
+    spin(lambda: len(owner.tray.messages) == 1)
+    for _ in range(4):
+        owner.poll()
+    assert len(owner.tray.messages) == 1
+    assert c.snapshot()["state"] == "waiting"
 
 
 @pytest.fixture
@@ -49,6 +69,37 @@ def lifecycle():
     owner.deleteLater()
 
 
+def test_alert_claim_failure_retries_without_restart_or_duplicate(lifecycle, monkeypatch):
+    import sqlite3
+    import time
+
+    owner, c, _, _ = lifecycle
+    attempts = []
+    original = c._store.notifications.claim_alert
+
+    def fail_once():
+        attempts.append(time.monotonic())
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original()
+
+    monkeypatch.setattr(c._store.notifications, "claim_alert", fail_once)
+    owner.window.hide()
+    c.submit("send", text="recover transient notification claim failure")
+
+    def delivered():
+        time.sleep(0.001)
+        return len(owner.tray.messages) == 1
+
+    spin(delivered, timeout=12)
+    assert len(attempts) == 2
+    assert attempts[1] - attempts[0] >= 0.9
+    for _ in range(5):
+        owner.poll()
+    assert len(owner.tray.messages) == 1
+    assert c.snapshot()["state"] == "waiting"
+
+
 def test_hide_keeps_single_consumer_and_pending_mark_and_tray_loss_restores(lifecycle):
     owner, c, available, _ = lifecycle
     owner.window.input.setPlainText("hide while waiting")
@@ -59,6 +110,7 @@ def test_hide_keeps_single_consumer_and_pending_mark_and_tray_loss_restores(life
     owner.poll()
     run_id = c.snapshot()["run_id"]
     assert "待处理" in owner.show_action.text()
+    spin(lambda: bool(owner.tray.messages))  # delivery is claimed by the worker
     count = len(owner.tray.messages)
     owner.poll()
     assert len(owner.tray.messages) == count

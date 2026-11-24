@@ -61,6 +61,8 @@ class DesktopController:
                       "schedule_draft": None, "scheduled_execution": None, "scheduler_error": "",
                       "memories": [], "memory_details": None, "memory_proposal": None,
                       "recalled_memories": [], "memory_source_available": False}
+        self._view.update(notifications=[], notification_settings={}, notification_due=False,
+                          notification_target=None, notification_alert=None)
         self._loop = None
         self._close_requested = threading.Event()
         self._shutdown_error = None
@@ -253,7 +255,9 @@ class DesktopController:
     async def _open(self, options):
         self._set(state="starting", pending=[], workspace="", provider="", session_id="", sessions=[], run_id="", materials=None,
                   tasks=[], executions=[], schedule_draft=None, scheduler_error="", memories=[],
-                  memory_details=None, memory_proposal=None, recalled_memories=[], memory_source_available=False)
+                  memory_details=None, memory_proposal=None, recalled_memories=[], memory_source_available=False,
+                  notifications=[], notification_settings={}, notification_due=False,
+                  notification_target=None, notification_alert=None)
         self._schedule_draft = None
         released = False
         try:
@@ -305,7 +309,7 @@ class DesktopController:
             # release the GIL, so publishing idle first exposes a partial view.
             self._set(state="idle", rows=[], pending=[], run_id="", notice="",
                       session_id=self._service.session.session_id, materials=self._materials(),
-                      tasks=self._store.tasks(), executions=self._store.executions())
+                      **self._schedule_values())
         except Exception as exc:
             detail = "配置结构或 YAML 格式无效（不展示可能含凭据的原始配置片段）" if isinstance(exc, ConfigError) else str(exc)
             if released:
@@ -346,11 +350,29 @@ class DesktopController:
                 request = next((p for p in self.snapshot()["pending"] if p["request_id"] == data["request_id"]), None)
                 if request is None:
                     raise RuntimeError("请求不存在或已回复")
-                if request["kind"] == "PermissionRequest" and value not in {"allow", "deny"}:
-                    raise ValueError("桌面只允许本次批准或拒绝")
+                if request["kind"] == "PermissionRequest":
+                    if not isinstance(value, str) or value not in {"allow", "deny"}:
+                        raise ValueError("桌面只允许本次批准或拒绝")
+                elif not isinstance(value, dict) or not all(
+                        isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+                    raise ValueError("补充回答必须是问题名到文本的映射")
+                if not self._request_is_live(request):
+                    raise RuntimeError("后端未接受回复：请求已过期或已处理")
+                # Commit the decision before releasing the tool. No await may
+                # separate this liveness check, commit and in-loop reply.
+                self._store.notifications.resolve(data["run_id"], request_id=data["request_id"],
+                    resolution=value if request["kind"] == "PermissionRequest" else "answered")
                 if not self._run.reply(data["run_id"], data["request_id"], value):
                     raise RuntimeError("后端未接受回复：请求已过期或已处理")
                 self._set(pending=[], state="running")
+                try:
+                    self._notification_view()
+                except Exception as exc:
+                    # A display refresh cannot turn an accepted grant into a
+                    # rejected command; the scheduler will refresh again.
+                    self._set(scheduler_error=f"回复已保存，通知刷新失败：{type(exc).__name__}: {exc}")
+            elif command.startswith("notification_"):
+                await self._notification_command(command, data)
             elif command.startswith("schedule_"):
                 await self._schedule_command(command, data)
             elif command.startswith("memory_"):
@@ -412,6 +434,11 @@ class DesktopController:
                 raise ValueError(f"未知命令：{command}")
         except Exception as exc:
             accepted, message = False, str(exc)
+            if command == "notification_alert":
+                # Every rejection, including a workspace handover, must release
+                # Qt's in-flight token even if another command overwrites ack.
+                self._set(notification_alert={"request_token": data.get("request_token"),
+                    "workspace": data.get("workspace"), "delivery": None, "failed": True})
         self._ack(command_id, accepted, message)
 
     def _sessions(self):
@@ -449,7 +476,100 @@ class DesktopController:
 
     def _schedule_view(self):
         if self._store:
-            self._set(tasks=self._store.tasks(), executions=self._store.executions())
+            self._set(**self._schedule_values())
+
+    def _schedule_values(self):
+        return dict(tasks=self._store.tasks(), executions=self._store.executions(), **self._notification_values())
+
+    def _notification_view(self):
+        if self._store:
+            self._set(**self._notification_values())
+
+    def _notification_values(self):
+        from likecc.notifications import is_quiet
+        ledger = self._store.notifications
+        return dict(notifications=ledger.rows(), notification_settings=ledger.settings(),
+                    notification_due=bool(ledger.due()), notification_quiet=is_quiet(self._clock(), ledger.settings()))
+
+    def _request_is_live(self, row):
+        run = self._run
+        return bool(run and run.status == "running" and run.run_id == row["run_id"]
+            and run.session_id == row["session_id"]
+            and run.interaction.is_pending(row["request_id"])
+            and (not row.get("execution_id") or self._execution_id == row["execution_id"]))
+
+    def _expire_notification_requests(self):
+        # Timeout/answer may finish a Future before its ToolResult is consumed.
+        # The single visible card is not authoritative for other live requests.
+        ledger = self._store.notifications
+        for row in ledger.active_requests():
+            if not self._request_is_live(row):
+                ledger.resolve(row["run_id"], request_id=row["request_id"])
+
+    async def _notification_command(self, command, data):
+        state = self.snapshot()
+        if (not self._store or data.get("workspace") != self._store.workspace
+                or state["workspace"] != self._store.workspace
+                or state["state"] in {"starting", "error", "closing", "closed"}
+                or self._closing or self._close_requested.is_set()):
+            raise ValueError("工作区已变化，请在当前通知中心重新选择")
+        ledger = self._store.notifications
+        if command == "notification_configure":
+            ledger.configure(data["settings"])
+        elif command == "notification_alert":
+            alert = {"request_token": data["request_token"],
+                     "workspace": self._store.workspace, "delivery": None}
+            self._expire_notification_requests()
+            alert["delivery"] = ledger.claim_alert()
+            values = self._notification_values()
+            self._set(notification_alert=alert, **values)
+        else:
+            # Re-read source facts before interpreting a click from a detached UI.
+            with self._store.transaction():
+                pass
+            row = ledger.get(data["notification_id"])
+            if row["revision"] != data["revision"]:
+                raise ValueError("通知已变化，请刷新后重新选择")
+            execution = self._store.execution(row["execution_id"]) if row["execution_id"] else None
+            request = next((p for p in self.snapshot()["pending"] if p["request_id"] == row["request_id"]
+                and p["run_id"] == row["run_id"] and p["session_id"] == row["session_id"]), None)
+            live_request = bool(request and self.snapshot()["state"] == "waiting"
+                                and self._request_is_live(row))
+            if command == "notification_open":
+                ledger.change(row["id"], row["revision"], "view")
+                mode = "request" if row["kind"] == "request" and row["valid"] and live_request else (
+                    "execution" if execution else "history")
+                self._set(notification_target={"token": uuid.uuid4().hex, "workspace": self._store.workspace,
+                    "notification_id": row["id"], "mode": mode, "task_id": row["task_id"],
+                    "execution_id": row["execution_id"], "run_id": row["run_id"],
+                    "request_id": row["request_id"], "session_id": row["session_id"]}, **self._schedule_values())
+            elif command in {"notification_snooze", "notification_dismiss"}:
+                if command == "notification_snooze" and row["kind"] == "request" and not live_request:
+                    raise ValueError("请求已经结束，只能查看历史")
+                ledger.change(row["id"], row["revision"], command.removeprefix("notification_"),
+                              minutes=data.get("minutes", 10))
+            elif command in {"notification_cancel_execution", "notification_stop_task"}:
+                if not execution or not row["valid"]:
+                    raise ValueError("该事项已结束，请从任务历史查看")
+                if row["kind"] == "request" and not live_request:
+                    raise ValueError("请求已经结束，不能取消其他运行")
+                if command == "notification_stop_task":
+                    task = self._store.task(execution["task_id"])
+                    if task["revision"] != data.get("task_revision") or not task["enabled"]:
+                        raise ValueError("安排已变化，请重新查看")
+                    await self._schedule_command("schedule_cancel", {"task_id": task["id"]})
+                elif execution["status"] in {"running", "waiting"}:
+                    if self._execution_id != execution["id"]:
+                        raise ValueError("本次执行已不在运行，请刷新核对")
+                    self._scheduled_cancel_requested = True
+                    if self._run:
+                        self._set(state="cancelling", pending=[])
+                        await self._run.cancel()
+                elif not self._store.cancel_execution(execution["id"]):
+                    raise ValueError("本次执行已经结束，只能查看历史")
+            else:
+                raise ValueError("未知通知命令")
+        self._schedule_view()
 
     def _prepare_schedule(self, spec, *, task_id=None, revision=None):
         if not self._store or not self._runtime:
@@ -514,6 +634,7 @@ class DesktopController:
                 return
             if self.snapshot()["state"] in {"starting", "error", "closing", "closed"}:
                 return
+            self._expire_notification_requests()
             self._store.scan()
             rows = [e for e in reversed(self._store.executions()) if e["status"] == "queued"]
             if rows and (self._run is not None or self.snapshot()["state"] != "idle"):
@@ -611,7 +732,7 @@ class DesktopController:
         self._execution_id = None
         self._set(**(self._foreground_view or {}), scheduled_execution=None,
             state="closing" if self._closing else "idle", pending=[],
-            tasks=self._store.tasks(), executions=self._store.executions())
+            **self._schedule_values())
         self._foreground_view = None
 
     async def _finish_scheduled(self, run):
@@ -623,6 +744,8 @@ class DesktopController:
         outputs = summary["artifacts"]
         reason = ("应用退出中断，请核对已有成果再明确重试。" if self._closing else
             "运行结束；" + ("成果状态见回读证据。" if outputs else "没有已写入的成果。"))
+        if status == "failed":
+            reason = f"运行失败：{run.error or '请查看本次会话诊断'}。"
         if uncertain_write:
             reason = "写入可能已部分或全部发生，结果尚未核实；请核对会话、成果和磁盘后明确重试。"
         if self._evidence_errors:
@@ -647,33 +770,47 @@ class DesktopController:
             self._row("error", f"运行失败：{type(exc).__name__}: {exc}")
         finally:
             if self._run is run:
-                if self._execution_id:
-                    try:
+                try:
+                    if self._store:
+                        self._store.notifications.resolve(run.run_id)
+                    if self._execution_id:
                         await self._finish_scheduled(run)
-                    except Exception as exc:
-                        self._run = None
-                        self._set(state="error", pending=[], scheduler_error=f"执行证据或资源收尾失败：{exc}；停止后续执行，请核对后重新打开工作区")
-                        self._row("error", "定时执行收尾失败，已停止后续领取；已有成果可能存在。")
-                        return
+                except Exception as exc:
+                    self._run = None
+                    self._set(state="error", pending=[], scheduler_error=f"运行通知、执行证据或资源收尾失败：{exc}；停止后续执行，请核对后重新打开工作区")
+                    self._row("error", "运行收尾失败，已停止后续领取；已有成果可能存在。")
+                    return
                 self._set(pending=[], state="closing" if self._closing else "idle")
                 self._run = None
                 self._sessions()
                 self._memory_view()
+                self._notification_view()
 
     def _event(self, event):
         if event["run_id"] != self.snapshot()["run_id"] or event["session_id"] != self.snapshot()["session_id"]:
             return
         kind, data = event["type"], event["data"]
-        if self._execution_id:
+        if self._store:
             if kind in {"PermissionRequest", "UserInputRequest"}:
-                self._store.update(self._execution_id, status="waiting", reason="需要本次权限决定或补充信息；请打开窗口处理")
+                if not self._request_is_live({"run_id": event["run_id"],
+                        "session_id": event["session_id"], "request_id": data["request_id"],
+                        "execution_id": self._execution_id}):
+                    return  # a queued event cannot revive an already ended Future
+                if not self._store.notifications.request(event, self._execution_id):
+                    return  # a delayed duplicate cannot resurrect a resolved request
             elif kind == "ToolResultEvent":
+                self._store.notifications.resolve(event["run_id"], tool_id=data["tool_id"])
+            elif kind == "LoopComplete":
+                self._store.notifications.resolve(event["run_id"])
+        if self._execution_id:
+            if kind == "ToolResultEvent":
                 if data["is_error"]:
                     self._evidence_errors.append({"tool_id": data["tool_id"], "output": data["output"][:3000]})
                 self._store.update(self._execution_id, status="running")
             if kind in {"PermissionRequest", "UserInputRequest", "ToolResultEvent", "LoopComplete", "ErrorEvent"}:
                 self._save_evidence()
-                self._schedule_view()
+                if kind not in {"PermissionRequest", "UserInputRequest"}:
+                    self._schedule_view()
         if kind == "MemoryRecall":
             self._set(recalled_memories=data["memories"])
         elif kind == "StreamText":
@@ -683,7 +820,8 @@ class DesktopController:
                 self._row("error", "不支持的问题类型；已取消运行，避免无限等待。")
                 self._schedule(uuid.uuid4().hex, "cancel", {})
                 return
-            self._set(state="waiting", pending=[{**data, "kind": kind, "session_id": event["session_id"]}])
+            self._set(state="waiting", pending=[{**data, "kind": kind, "session_id": event["session_id"]}],
+                      **self._schedule_values())
         elif kind == "ToolUseEvent":
             self._row("tool", f"{data['tool_name']}: {data['arguments']}", tool_id=data["tool_id"])
         elif kind == "ToolResultEvent":
@@ -709,3 +847,5 @@ class DesktopController:
             self._set(pending=[], last_status=data["status"], materials=self._materials())
         elif kind in {"HookEvent", "CompactNotification", "RetryEvent"}:
             self._row("diagnostic", str(data))
+        if kind in {"PermissionRequest", "UserInputRequest", "ToolResultEvent", "LoopComplete"}:
+            self._notification_view()
