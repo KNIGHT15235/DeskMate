@@ -1,6 +1,279 @@
 # 验证说明
 
-本页按阶段保留 LikeCC 0.2.0 和 DeskMate 各轮实际结果。各阶段的“待确认”代表当时状态；人工证据见 [R5 人工验收报告](#deskmate-r5-人工验收报告2026-11-22)，最新代码结果见文末 [独立仓库审查修复](#r5-独立仓库提交前审查修复2026-11-22)。
+本页按阶段保留 LikeCC 0.2.0 和 DeskMate 各轮实际结果。各阶段的“待确认”代表当时状态；最新提交前复审见首节，R8-A.1 及更早数字均为历史证据，不计作本次重跑。剩余人工项继续按用户要求暂缓。
+
+## R8-A 提交前代码复审与版本固定（2026-11-25）
+
+### Git、环境与审查范围
+
+仅操作 `D:\ldj\03\DeskMate-Standalone`，`main`，提交前 HEAD 为 R7 `22f4ddeb30bb74617cd6080f912155a43f385b82`。origin fetch/push 均指向 `https://github.com/KNIGHT15235/DeskMate.git`；R7 为当前祖先，初始暂存区为空，没有 merge/rebase/cherry-pick 等未完成操作。所有既有 R8-A 修改保留。以命令级 `safe.directory` 适配 Windows 归属检查，没有更改全局 Git 配置。
+
+Windows 实测 10.0.19045、Conda deskmate-win Python 3.12.7、PySide6 6.8.3、SQLite 3.54.1；WSL Ubuntu-24.04 / cc Python 3.11.16、PySide6 6.8.3、SQLite 3.53.4。读取实际源码、全部变更测试和目标/路线/UX/验证/学习文档，核对 R8-A.1 日志与历史源码 manifest。开始时 214 个 Python 文件与历史最终回归一致；本轮复审后有 5 个文件变化：controller、window、schedules、widgets 和 test_desktop_ux，因此完整回归重新执行。
+
+五页导航只管理 QWidget 可见性；Qt 主线程不执行模型或文件读取，后台 asyncio、唯一事件消费者和 Runtime 资源所有权保留。原权限回复继续核对 session/run/request，通知继续核对 workspace/revision/真实请求；查看不批准、稍后不重跑，停止周期仍需明确确认。核对绑定 execution_id，记忆修改删除继续经服务，定时上下文和权限范围未扩大。成果仅显式读取已有记录的工作区内 UTF-8 Markdown/文本，最大 512 KiB，纯文本展示，不提升历史回读状态。没有改动 Agent、Runtime、SessionService、权限策略、SQLite 核心或 DesktopApplication 生命周期。
+
+### 先复现、后最小修复
+
+| 问题 | 复现证据 | 最小修复 |
+| --- | --- | --- |
+| P0：连续预览覆盖较新任务草稿 | `r8-review-repro.log` 的任务用例失败，第一份响应把第二份表单恢复为第一份 | 临时 preview_id 与表单快照绑定，旧响应不能消费新请求；原保存 token 与 revision 仍有效 |
+| P1：换成果文件保留旧内容或接收迟到结果 | 同一日志的文件选择用例失败，新路径下仍显示 FIRST FILE | 选择变化清空内容、折叠预览并废弃旧读取令牌，不自动发起读取 |
+| P1：不同执行复用路径时预览串来源 | `r8-review-context-repro.log`：执行切换 1 failed，目录链接边界 1 passed | 预览身份包含 execution，聊天包含 session/run；变更来源后要求显式重新读取 |
+| P0：旧工作区释放期仍可预览/取消任务 | `r8-review-handover-repro.log`：2 failed；通过可控异步释放复现旧调度库接受命令 | 调度入口同时核对就绪状态、展示 workspace 和存储 workspace |
+| P0：后台已切换但旧页面尚未刷新时，草稿进入新工作区 | `r8-review-stale-page-repro.log`：对话/任务/记忆 3 failed | 主窗口提交携带实际展示工作区，后台在任何修改前重新匹配，旧页面得到拒绝回执 |
+
+后两组先在忽略目录的独立探针复现，以保持当时完整测试运行中的源码不变；确认后原样纳入 `tests/test_desktop_ux.py`。本轮共新增 9 项用例，该模块由 18 增至 27。Windows 的目录链接测试实际使用 NTFS junction，WSL 使用符号链接，没有增加跳过、降低原断言或提高已有等待上限。
+
+### 本次实际验证
+
+所有测试使用隔离目录和 fake client。Qt offscreen 仅作为自动化环境，不代表新的 Windows 人工验收。两平台完整回归串行执行；日志、XML、源码 manifest 和辅助脚本仅保存在已忽略的 `.r1-verification/`。
+
+| 阶段 / 命令内容 | 实际结果 |
+| --- | --- |
+| 最初两个复现用例 | 2 failed；修复后相关预览用例 4 passed / 16 deselected，7.10s |
+| 来源切换与链接越界复现 | 1 failed / 1 passed / 20 deselected，11.18s |
+| 前三项修复后 GUI 9 模块 | 97 passed，6 warnings，83.25s |
+| 首轮 Windows 完整回归（工作区隔离修复前） | 1012 passed / 6 skipped / 6 warnings，238.54s；SubAgent 90/90 |
+| 首轮 WSL 完整回归（工作区隔离修复前） | 1018 passed / 6 warnings，150.69s；SubAgent 90/90 |
+| 交接与旧页面命令复现 | 分别 2 failed / 13.06s、3 failed / 2 deselected / 12.39s；未作为通过证据 |
+| 全部五项修复后 Windows GUI 9 模块 | **102 passed，6 warnings，90.13s** |
+| 隔离防护的首次完整复测 | Windows 2 failed / 1015 passed / 6 skipped，214.87s；旧故障恢复回归发现 error 状态的诊断扫描被过度拦截，执行证据未刷新。保留失败记录 `r8-win-review-verified-full.log`；收窄为允许同工作区的只读诊断扫描，原 `_tick_schedules` 继续阻止派发，交接/关闭及跨工作区仍拒绝 |
+| 诊断兼容修正后定向回归 | **34 passed，1 warning，27.96s**；原两项失败恢复断言、9 项新增边界及原 UX 回归均通过 |
+| 最终 Windows 启动专项 | **6 passed / 13 deselected，1.64s**；最大 wait 0.094s、最大 `_open` 0.125s，未复现超时 |
+| 最终 Windows 完整离线回归 | **1017 passed / 6 skipped / 6 warnings，203.20s**；原 6 项平台跳过不变 |
+| 最终 WSL 启动专项 | **6 passed / 13 deselected，6.07s**；最大 wait 0.499s、最大 `_open` 0.550s，未复现超时 |
+| 最终 WSL 完整离线回归 | **1023 passed / 0 skipped / 6 warnings，145.22s** |
+| 双平台独立 SubAgent、编译、入口与 fake 演示 | **各 90/90**；各 214 个 Python 文件 AST/内存编译通过，3 个帮助入口、离线样例准备及推进时钟均 exit 0 |
+| Windows / WSL `python -m pip check` | 两平台均 `No broken requirements found` |
+| `uv lock --check --offline --python <deskmate-win-python>` | 58 packages，exit 0，锁文件未改 |
+| `git diff --check`、提交候选路径/敏感信息检查 | 通过；4 处匹配为 R7 既有环境变量示例或离线假值，复核后无待处理匹配；本机数据不进入提交 |
+
+最终完整回归入口命令：
+
+```powershell
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r8_run.py D:/ldj/03/DeskMate-Standalone win-review-release
+wsl.exe -d Ubuntu-24.04 --cd /mnt/d/ldj/03/DeskMate-Standalone -- /home/ldj/anaconda3/envs/cc/bin/python -s -B -X utf8 .r1-verification/r8_run.py /mnt/d/ldj/03/DeskMate-Standalone wsl-review-release
+```
+
+该本地辅助脚本在新的临时 cwd 依次执行 `python -s -B -X utf8 -m pytest -q -ra -p no:cacheprovider -c REPO/pyproject.toml --rootdir=REPO REPO/tests --basetemp=TEMP/pytest --junitxml=REPORT`、`python REPO/tests/verify_subagent.py`、`python -m likecc --help`、`python -m likecc.desktop --help`、`python -m examples.deskmate_notifications --help`、同样例的 `--check --root TEMP/demo` 与 `--advance-minutes 10 --root TEMP/demo`；解释器前缀、`PYTHONPATH=REPO;REPO/tests`（Linux 为冒号）与 `QT_QPA_PLATFORM=offscreen` 固定。214 个 Python 文件逐个 AST 解析和内存编译并记录 SHA-256。没有真实 Provider、网页或外部 MCP 调用；网络操作仅为用户明确授权的 Git fetch/push/远程 SHA 核验。
+
+GUI 定向命令为上述 pytest 参数加 9 个模块：`test_desktop_ux.py`、`test_desktop_window.py`、`test_desktop_lifecycle.py`、`test_desktop_scheduling.py`、`test_desktop_memory.py`、`test_desktop_notifications.py`、`test_r6_schedule_review.py`、`test_r7_acceptance.py`、`test_r7_request_review.py`，结果保存为 `r8-review-gui-final.log/xml`。诊断兼容修正后另外运行 `test_schedule_review_regressions.py tests/test_desktop_ux.py`（相同 pytest 参数，日志 `r8-review-diagnostics.log/xml`），再跑完整回归。最终启动专项沿用 `.r1-verification/r8_a1_probe.py REPO <win/wsl>-review-release-startup startup`，内部运行 `test_r7_request_review.py -k old_notification_commands -o faulthandler_timeout=5`，仅记录时长，原 6 秒等待不变；结果前缀 `r8-a1-<win/wsl>-review-release-startup`。
+
+历史 R8-A Windows 1008 passed / 6 skipped、WSL 1014 passed，以及 R8-A.1 GUI 93 passed / 启动各 6 passed，仅用于来源核对。首轮本次全量通过后又发现交接问题，因此也仅作中间结果；最终结论必须使用包含全部 9 个新用例的最后一轮，不混用数字。Qt 官方候选替代在 R8-A.1 出现 2 项焦点失败，本轮没有再次替换或删断言，保留现接口与 6 条弃用警告；偶发启动超时继续观察，未虚构根因。
+
+最终 `r8-win-review-release-*` 与 `r8-wsl-review-release-*` 的 manifest 完全相同，并与当前 214 个 Python 文件逐个哈希一致。Windows 仍只跳过原 5 项 POSIX 进程组契约与 1 项依赖系统文件的旧符号链接用例；新增目录联接越界用例实际通过。所有复审 P0/P1 已修复，当前未发现未解决的提交阻塞；具备固定 R8-A 代码版本的条件，完整人工产品验收仍未完成。
+
+### 文件边界、版本固定与发布前清单
+
+本轮预定提交 25 个文件：9 个 desktop 源码（controller/window/schedules/memories/notifications/artifacts/widgets/theme/presentation）、4 个 GUI 测试、`scripts/capture_desktop_ux.py`、README 和 10 份文档。逐路径暂存，复核 cached name-status/stat/check；不纳入 `.likecc/`、`.r1-verification/`、数据库/WAL/SHM、截图、测试日志、虚拟环境、缓存或构建产物。源码 ZIP 使用成功推送后的完整 SHA 从 Git 对象导出，放在仓库外；实际提交 SHA、远端一致性及 ZIP 路径以版本固定交付报告为准。
+
+用户允许剩余人工项目未完成时提交 R8-A，但这不等于产品全部验收。发布前仍需补齐：八项 Windows 真实操作的未覆盖部分；剩余截图及主观视觉评价；100%/125%/150% 原生缩放；真实系统托盘和通知交互；真实 Provider 记忆质量；R5 真实拒绝写入；R4 实网读取期间取消和重定向。已有“整洁美观”、导航/草稿/提醒/周期修改及权限卡片的部分反馈与一张原生截图仍只按下面 R8-A.1 的实际覆盖范围保留。本轮不再要求人工操作，不启动 R8-B、不制作安装包、不创建 Release。
+
+## DeskMate R8-A.1（2026-11-24～25，阶段收尾／人工暂缓）
+
+### 本轮实际预检
+
+- `git status --short` / `rev-parse`：`main`，HEAD `22f4ddeb30bb74617cd6080f912155a43f385b82`；保留全部 R8-A 未提交修改，不暂存、不提交、不推送。
+- Windows `deskmate-win` 实测 Python 3.12.7、PySide6 6.8.3、pytest 9.0.3、SQLite 3.54.1。当前 214 个 Python 文件按文本 SHA-256 核对，与 `r8-win-final-serial-manifest.json` 全部一致。
+- 已读取 R8-A 两平台 summary / 日志：Windows 1008 passed / 6 skipped、WSL 1014 passed、SubAgent 各 90/90。以上是核对历史报告，不计作本轮重跑。后续 R8-A.1 专项已实际使用 WSL cc：Python 3.11.16、PySide6 6.8.3、SQLite 3.53.4，详见下方专项结果。
+- 已确认 `examples/deskmate_notifications.py` 使用 fake client、隔离用户配置、A/B 工作区、真实控制器及 SQLite。没有真实 Provider 请求。
+- 第一次从受限执行环境启动的测试进程未出现在 Windows 可见窗口列表，已仅终止该实例；这是启动工具环境记录，不计入第 8 项正常退出验收。随后使用新的隔离目录启动，窗口枚举实际返回唯一“DeskMate 桌伴”。尚未据此判定内容渲染或操作通过。
+
+当前验收根目录：`.r1-verification/r8-a1-visible-20261124-220538/`。实际进程入口：
+
+```powershell
+# 设置仅作用于启动子进程的环境；未改变系统缩放。
+$env:QT_QPA_PLATFORM = 'windows'
+Remove-Item Env:QT_SCALE_FACTOR -ErrorAction SilentlyContinue
+Remove-Item Env:QT_SCREEN_SCALE_FACTORS -ErrorAction SilentlyContinue
+& C:\Users\28436\.conda\envs\deskmate-win\pythonw.exe -u -s -B -X utf8 -m examples.deskmate_notifications --root D:\ldj\03\DeskMate-Standalone\.r1-verification\r8-a1-visible-20261124-220538
+```
+
+通过 `Start-Process -WindowStyle Normal` 启动并将 stdout / stderr 分别保存到该目录 `launch.log` / `error.log`；已核对打印的 `offline-r7 / fake`，启动错误日志为空。测试窗口保留给用户操作。`screenshots/` 已创建且由仓库现有规则忽略，尚未保存本轮原生截图；不复用 R8-A 的 18 张 offscreen 图作为本轮可见证据。
+
+### 人工验收进度
+
+| 项目 | Windows 实际窗口 | 用户视觉 / 操作反馈 |
+| --- | --- | --- |
+| 1 主界面与导航 | 用户确认五页切换正常；手动缩小后恢复窗口，未发现严重遮挡，按钮可见或可滚动到达；未记录具体尺寸和系统缩放 | 2026-11-25：初始界面“正常显示，整洁美观”；任务“顺畅，正常显示”；记忆“顺畅无遮挡”；其余导航与窗口布局合并反馈“这组正常” |
+| 2 对话与草稿保持 | 用户确认未发送草稿切任务页再返回后完整且可继续编辑；工具详情默认折叠并可展开。运行期间切页是否重跑的人工核对暂缓，不包含跨退出持久化 | 2026-11-25 合并反馈：“这组正常” |
+| 3 一次性提醒 | 用户确认对话输入“明天晚上七点提醒我复习项目笔记”后自动进入预览，明天 19:00 / Asia/Shanghai / 一次性正确，确认保存后易于定位；按发送→确认保存两次主要按钮路径，未反馈多余或不清楚的操作。到期处理尚未在本项验收 | 2026-11-25 用户原话：“全部正确” |
+| 4 周期任务管理 | 用户确认“R7 两次写入”的状态、时间、执行历史和技术详情可查看，修改为 2026-11-26 20:00 / Asia/Shanghai / 每周并预览确认后成功，历史保留；只读数据库复核一致。停止安排及取消单次动作人工验收暂缓 | 2026-11-25 用户原话：“全部正确” |
+| 5 权限交互与通知跳转 | 用户确认原卡片跳转、路径及三个操作正确；原生手动截图已核对。两项请求随后均 ended，未写入。批准/拒绝/取消实际点击结果与旧通知历史跳转人工验收暂缓 | 2026-11-25 用户原话：“正确”“已保存”；截图 `screenshots/06-permission.png` |
+| 6 成果预览 | 未完成人工验收 | 用户要求暂缓 |
+| 7 记忆管理 | 未完成人工验收 | 用户要求暂缓 |
+| 8 系统托盘与退出 | 未完成人工验收；不得以第一次测试进程的强制清理代替 | 用户要求暂缓 |
+
+2026-11-25 用户明确要求先跳过剩余人工步骤，已确认结果保留；其余人工项、100% / 125% / 150% 原生缩放及剩余六类截图均记为暂缓／未验收。转入无需人工操作的专项检查与文档收尾，不据此宣布 R8-A 已全部验收，R8-B 尚未开始。
+
+只读记录 `manual-deferred-state.json`：该次运行 completed，但 reason 明确“没有已写入的成果，存在工具拒绝或失败”，artifact 与 write_intents 均为空，两项请求 active=0 / ended；fake 模型输入日志 6 条、写入日志 0 条，两输出均不存在。没有把运行结束当成文件生成成功。桌面进程仍在，没有执行或声称通过本轮正常退出清理。
+
+### 周期修改复核与权限场景准备（2026-11-25）
+
+以 `sqlite3.connect(..., uri=True)` 的 `mode=ro` 连接只读查询当前隔离 A 工作区。周期任务修改结果为 revision 2、`2026-11-26T20:00:00 / Asia/Shanghai / weekly`；旧次执行为 cancelled，历史保留，model_policy=ask，输出仍为 `outputs/first.md`、`outputs/second.md`。查询辅助命令最初漏传 `uri=True` 两次打开失败，修正该只读查询后成功；这不是产品数据库故障，没有修改产品代码。
+
+从实际 next_due 与演示时钟计算所需分钟数后，运行：
+
+```powershell
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 -m examples.deskmate_notifications --root D:\ldj\03\DeskMate-Standalone\.r1-verification\r8-a1-visible-20261124-220538 --advance-minutes 1672
+```
+
+命令 exit 0，演示时钟推进至 `2026-11-26T12:02:07.719719+00:00`，系统时间未改变。后续只读断言确认新执行为 awaiting_model、对应“等待本次模型调用确认”通知存在、历史 cancelled 记录仍在；推进前后 `model-inputs.jsonl` 和 `writes.jsonl` 均为 0 条。只读快照保存在验收根目录 `before-permission-clock.json` / `after-permission-clock.json`。这属于场景准备与数据核对，不计为用户已经批准模型、写入权限或完成成果验收；推进也使较早的隔离提醒到期，不涉及真实用户安排。
+
+### 权限卡片观察与截图尝试（2026-11-25）
+
+用户确认通知跳转、卡片可见性、路径及按钮含义正确后，只读核对当前执行 waiting、WriteFile 请求 description=`outputs/first.md` 且 active=1；fake 模型输入日志 2 条、写入日志 0 条，`outputs/first.md` 和 `outputs/second.md` 均不存在。证据为验收根目录 `permission-card-observed.json`，未自动批准任何写入。
+
+以 computer-use 的 `sky.list_windows()` 重新选择唯一“DeskMate 桌伴”，请求原生窗口截图：第一次返回 `FrameArrived timed out: timed out waiting on channel`；重新枚举、选择窗口后重试一次，返回 `window capture timed out: timed out waiting on channel`。两次均未取得截图，随后停止自动采集；不使用 offscreen 代替，也不修改产品代码。开始指导用户用 Windows 截图工具手动保存 `screenshots/06-permission.png`；当前仍待用户确认文件已保存。
+
+用户随后反馈“已保存”，文件已实际读取并视觉核对：原生窗口中 first.md 的 WriteFile 卡片、本次允许/拒绝/取消运行三按钮清楚可见，素材为隔离 fake 工作区，未见真实密钥或私人文档。该截图不证明后来仍是同一活动请求。
+
+保存后的只读快照 `after-permission-screenshot.json` 显示：first.md 请求 active=0 / resolution=ended，工具证据为权限拒绝及后续文件不存在；同一运行已产生 second.md 请求 active=1。源文件读取时间 08:13:14 UTC、首次失败读取 08:18:14 UTC，与默认 300 秒等待相符；持久记录未单独保存超时原因，故不假定用户主动点了拒绝。此时 fake 模型输入日志 4 条、写入日志 0 条、两输出均不存在。接下来按当前 second.md 卡片进行明确允许验收，不重新批准旧请求或修改权限策略。
+
+### 人工暂缓后的自动专项（2026-11-25）
+
+用户暂缓人工项目后，本轮继续已有授权范围内的只读检查和隔离离线测试。没有修改产品 Python 源码、测试断言或超时。被 Git 忽略的 `.r1-verification/r8_a1_probe.py` 为本轮独立探针：新建临时 cwd，使用指定解释器和仓库源码，offscreen 仅用于自动化；不操作正在展示的真实窗口，不将自动化冒充人工通过。
+
+实际入口命令（输出日志、XML、summary 均在 `.r1-verification/`）：
+
+```powershell
+wsl.exe -d Ubuntu-24.04 --cd /mnt/d/ldj/03/DeskMate-Standalone -- /home/ldj/anaconda3/envs/cc/bin/python -s -B -X utf8 .r1-verification/r8_a1_probe.py /mnt/d/ldj/03/DeskMate-Standalone wsl-startup startup
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r8_a1_probe.py D:/ldj/03/DeskMate-Standalone win-startup startup
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r8_a1_probe.py D:/ldj/03/DeskMate-Standalone win-focus-candidate focus-candidate
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r8_a1_probe.py D:/ldj/03/DeskMate-Standalone win-gui-current gui
+```
+
+探针调用 pytest 的共同参数为 `-q -ra -p no:cacheprovider -c REPO/pyproject.toml --rootdir=REPO --junitxml=REPORT`。startup 指定 `tests/test_r7_request_review.py -k old_notification_commands -o faulthandler_timeout=5`，保留原 `wait(..., timeout=6)`，记录实际 wait / `_open` 时间，失败时打印线程栈。focus-candidate 指定 `tests/test_r7_acceptance.py -k permission_navigation_reveals_card`，仅在该进程临时替换激活调用；不更改保存的源码。
+
+| 本轮实际检查 | 结果 | 结论 |
+| --- | --- | --- |
+| WSL 启动相关原 6 个参数用例 | 6 passed / 13 deselected，5.74s | 未复现；最大 wait 0.998s，最大 `_open` 0.996s |
+| Windows 同组启动用例 | 6 passed / 13 deselected，1.58s | 未复现；最大 wait / `_open` 均约 0.125s |
+| Windows 激活接口候选替代 | 6 passed / 2 failed / 11 deselected，53.55s | row-hidden / button-hidden 在原 `request_area.hasFocus` 等待处失败；候选未采纳 |
+| Windows 当前实现 GUI 回归 | **93 passed / 0 failed / 0 skipped，6 warnings，73.19s** | 独立新进程，不装载候选替代；包含原隐藏恢复焦点断言 |
+
+startup 结果只说明本次定向复测未复现，不足以把历史超时归因于线程启动、事件循环、系统负载或同步逻辑；没有据此调整时限。Qt 6.8 [官方弃用说明](https://doc.qt.io/qt-6.8/qapplication-obsolete.html) 推荐 `QWidget.activateWindow()`；[该 API 的 Windows 前台激活限制](https://doc.qt.io/qt-6.8/qwidget.html#activateWindow) 也说明不能仅按接口名称推导平台等价。候选保持原延迟回调、可见性和 request_id 校验，只替换两行激活调用；由于真实焦点断言失败，保留当前实现及弃用警告，后续结合原生验证处理。
+
+gui 模式覆盖 `test_desktop_window.py`、`test_desktop_lifecycle.py`、`test_desktop_ux.py`、`test_desktop_scheduling.py`、`test_desktop_memory.py`、`test_desktop_notifications.py`、`test_r6_schedule_review.py`、`test_r7_acceptance.py`、`test_r7_request_review.py`。本轮没有更改公共组件或生命周期实现，不重跑整套 1014 项和 SubAgent 90 项；R8-A 的双平台全量结果继续仅作为历史证据。
+
+最终核对当前 `likecc/`、`tests/`、`examples/`、`scripts/` 共 214 个 Python 文件与 R8-A 最终源码 manifest 一致，产品及既有测试源码未变；`git diff --check` 通过。当前 GUI 回归 6 条警告均来自保留的 Qt 激活接口。人工截图 `06-permission.png` 实际为 1386×937 PNG、125717 字节，SHA-256 为 `1642a7648ca0eb41e3cdd383436a221c2af88ee60565e5b8129c4a4277b38d61`。
+
+### DeskMate R8-A.1 UI/UX 阶段验收报告
+
+本报告对应用户主动暂缓剩余人工步骤后的阶段性收尾，不是全部人工验收完成报告。
+
+| 项目 | 结论 |
+| --- | --- |
+| 1 Git 与环境 | main / 22f4ddeb30bb74617cd6080f912155a43f385b82；Windows deskmate-win Python 3.12.7、WSL cc Python 3.11.16，PySide6 均 6.8.3；R8-A 改动继续未提交 |
+| 2 八项可见结果 | 基础主界面、导航、草稿、一次性提醒、周期查看修改及权限卡片跳转已有用户确认；运行中切页、授权结果、取消/停止、成果、记忆、托盘退出未完成的部分暂缓，详见上表 |
+| 3 实际截图 | `.r1-verification/r8-a1-visible-20261124-220538/screenshots/06-permission.png`，用户 Windows 手动采集并已读取核对；其余六类暂缓 |
+| 4 视觉反馈 | 用户评价“正常显示，整洁美观”；导航顺畅、无遮挡，手动缩小恢复后布局正常；指定系统缩放尚未确认 |
+| 5 核心流程改善 | 提醒创建和周期修改获得正向确认，通知定位原卡片正确；记忆与成果预览的真实体验尚不能据此评价 |
+| 6 P0/P1/P2 | 本轮用户未报告已确认的 P0/P1/P2 产品缺陷；Qt 激活兼容与历史启动超时列为 OBS-01/02 观察项，不把未验收等同无问题 |
+| 7 必要修复 | 未改产品代码；Qt 候选仅在独立测试进程验证，因两项焦点回归未采纳；截图失败采用手动采集，没有改业务代码 |
+| 8 本次测试 | Windows GUI 93 通过；Windows/WSL 启动各 6 通过；Qt 候选 6 通过/2 失败；源码 manifest 一致、diff 空白检查通过。命令、日志和失败均见上方 |
+| 9 未解决事项 | Qt 弃用警告保留，历史启动超时根因未明；其余人工及原生缩放暂缓，原生自动截图接口不可用；现存演示窗口保留且本次执行已结束、无成果 |
+| 10 最终标准 | 尚未达到完整人工验收标准；具备可供代码复审的阶段性基线 |
+| 11 R8-B 建议 | 下一步先复审当前改动并明确 R8-B 范围；可把暂缓的人工项并入 R8-B 发布前验收，但不能据此宣称已验证全部真实窗口行为。本轮不启动打包 |
+| 12 用户后续确认 | 确认阶段性基线及未验收清单是否接受、是否将剩余人工项纳入 R8-B，以及下一轮打包范围；当前无需继续逐项人工操作 |
+
+本轮没有暂存、提交、推送、创建 Release 或制作安装包，没有调用付费 Provider。阶段收尾完成，等待用户复审和下一轮指令。
+
+## DeskMate R8-A（2026-11-24）
+
+### 基线、范围与环境
+
+只在 `D:\ldj\03\DeskMate-Standalone` / `/mnt/d/ldj/03/DeskMate-Standalone` 开发。开始时 `main` / `22f4ddeb30bb74617cd6080f912155a43f385b82`，工作区干净；完成后仍在该分支及 HEAD，未提交、推送、发布或打包。旧项目目录没有修改。
+
+| 平台 | 解释器 | Python / PySide6 / pytest / SQLite |
+| --- | --- | --- |
+| Windows Conda deskmate-win | `C:\Users\28436\.conda\envs\deskmate-win\python.exe` | 3.12.7 / 6.8.3 / 9.0.3 / 3.54.1 |
+| WSL Ubuntu 24.04 Conda cc | `/home/ldj/anaconda3/envs/cc/bin/python` | 3.11.16 / 6.8.3 / 9.0.3 / 3.53.4 |
+
+没有新增依赖或更改 `pyproject.toml` / `uv.lock`，没有安装环境包。变更限于桌面展示与适配、测试、离屏截图脚本和文档；Agent、Runtime、SessionService、权限、调度/记忆/通知业务核心及 `DesktopApplication` 保持原实现。
+
+### 实际命令与隔离方式
+
+最终检查由被 Git 忽略的 `.r1-verification/r8_run.py` 顺序执行，输出同目录的 `r8-<平台>-<检查>.log`、JUnit XML、summary JSON 和源码 manifest。该脚本为本地验收辅助，不是产品运行依赖。实际入口命令：
+
+```powershell
+Set-Location D:\ldj\03\DeskMate-Standalone
+wsl.exe -d Ubuntu-24.04 --cd /mnt/d/ldj/03/DeskMate-Standalone -- /home/ldj/anaconda3/envs/cc/bin/python -s -B -X utf8 .r1-verification/r8_run.py /mnt/d/ldj/03/DeskMate-Standalone wsl-final-serial
+& C:\Users\28436\.conda\envs\deskmate-win\python.exe -s -B -X utf8 .r1-verification/r8_run.py D:/ldj/03/DeskMate-Standalone win-final-serial
+```
+
+每个平台使用独立临时 cwd，把仓库及 `tests` 加入 `PYTHONPATH`，设置 `QT_QPA_PLATFORM=offscreen`、`PYTHONDONTWRITEBYTECODE=1`、`PYTHONUTF8=1`，复制测试所需 README / pyproject 到临时目录。源码导入路径核对指向本独立仓库。子进程均使用对应解释器和 `-s -B -X utf8`，实际执行下列检查（`REPO`、`CWD`、`REPORT` 为该平台绝对路径）：
+
+```text
+python -m pytest -q -ra -p no:cacheprovider -c REPO/pyproject.toml --rootdir=REPO REPO/tests --basetemp=CWD/pytest --junitxml=REPORT
+python REPO/tests/verify_subagent.py
+python -m likecc --help
+python -m likecc.desktop --help
+python -m examples.deskmate_notifications --help
+python -m examples.deskmate_notifications --check --root CWD/demo
+python -m examples.deskmate_notifications --advance-minutes 10 --root CWD/demo
+```
+
+另外以 `ast.parse` 和内存 `compile(source, path, 'exec')` 检查 `likecc/`、`tests/`、`examples/`、`scripts/` 下所有 Python 文件，生成按文本规范化换行后的 SHA-256 manifest，不写 pyc、不构建分发包。测试用 fake client、临时 SQLite 和工作区；没有调用计费 Provider、读取个人模型配置或使用外部网络完成测试。
+
+锁一致性与空白检查的实际命令：
+
+```powershell
+$env:UV_PYTHON_DOWNLOADS = 'never'
+$env:UV_CACHE_DIR = 'D:\ldj\03\DeskMate-Standalone\.r1-verification\uv-r8-cache'
+& C:\Users\28436\.local\bin\uv.exe lock --check --offline --python C:\Users\28436\.conda\envs\deskmate-win\python.exe
+git -c safe.directory=D:/ldj/03/DeskMate-Standalone diff --check
+```
+
+`uv lock --check` 通过，解析 58 个包，没有重写锁文件。Git 的单次 `safe.directory` 参数仅用于当前命令，不修改全局配置。
+
+### 自动化结果
+
+最终两平台串行运行，同一份 214 个 Python 源文件的 manifest 一致，结果如下；不是 R7 历史数字：
+
+| 检查 | Windows（r8-win-final-serial） | WSL（r8-wsl-final-serial） |
+| --- | --- | --- |
+| 完整 pytest | **1008 passed / 6 skipped / 0 failed，165.93s** | **1014 passed / 0 skipped / 0 failed，171.56s** |
+| 独立 SubAgent 脚本 | **90/90** | **90/90** |
+| Python 语法 / 编译 | 214 文件通过 | 214 文件通过 |
+| CLI / 桌面 / 通知演示帮助 | 均 exit 0 | 均 exit 0 |
+| 离线演示准备 / 时钟推进 | 均 exit 0 | 均 exit 0 |
+
+Windows 6 个跳过沿用原平台条件：5 个 POSIX/WSL 进程组契约，1 个缺少适合的系统文件用于 symlink 检查；本轮没有新增 skip。每个平台完整测试各有 6 条 Qt 激活 API 弃用警告，详见下方。`git diff --check` 通过，源码与测试保持最终回归时版本。
+
+新增 `tests/test_desktop_ux.py` 共 18 项：导航期间消费者/权限不变、各编辑器草稿、流式文本选择与滚动、A/B 工作区隔离、交接隐藏旧审计但显示启动错误、预览失效及迟到响应不覆盖新输入、真实成果预览不重跑且不改证据、关闭提醒仍待业务处理、四种成果状态、受限文件预览、五档窗口大小和滚动到确认按钮。最终新增用例专项 Windows 结果为 **18 passed，1 warning，17.51s**（`r8-win-audit-green.log`）。既有 R6/R7 的实际权限、写入、取消/停用、核对、记忆失效与重启契约仍参加完整回归。
+
+### 中间失败与修复记录
+
+所有下列记录均来自本轮，不删除失败日志，不把文件名中的 `final` 当成通过证据。
+
+| 记录前缀 / 检查 | 实际结果 | 处理 |
+| --- | --- | --- |
+| r8-win-ui-first | 14 failed / 31 passed | 原工具文字断言迁移到完整工具过程；嵌入页可见性及停止周期确认适配继续修复 |
+| r8-win-ui-second | 9 failed / 32 passed / 3 errors | 改用真正 QWidget 页面；长标签允许换行收缩；补齐新测试依赖的离线网络 guard fixture 导入 |
+| r8-win-ui-third | 2 failed / 32 passed | 隐藏窗口恢复后原权限按钮焦点仍不正确，保留失败继续处理 |
+| r8-win-ui-final | 2 failed / 56 passed | 同一焦点问题；加入恢复后延迟聚焦，并重新校验当前页及请求身份 |
+| r8-win-focus | 8 passed / 11 deselected | 对应隐藏/最小化恢复与权限导航专项通过 |
+| r8-win-full | 1 failed / 1004 passed / 6 skipped，240.88s | 旧 R6 导航文案断言仍要求完整长标签；迁移到无障碍描述/提示与可见待处理数，保留 0/1 状态和业务断言 |
+| r8-win-ui-fonts | 1 failed / 58 passed | 同一 R6 用例的第二个旧标签断言继续迁移 |
+| r8-win-ui-green | 60 passed，65.41s | 受影响 GUI、生命周期、记忆、调度、通知模块通过；随后补充交接错误展示和通知筛选两项边界 |
+| r8-wsl-final | 1012 passed / 0 skipped，141.49s | 当时版本的完整结果；之后新增两项用例，不能作为最终源码计数 |
+| r8-wsl-verified | 1 failed / 1013 passed / 0 skipped，149.43s | `test_old_notification_commands_are_rejected_during_workspace_release[open]` 在初始控制器启动的 6 秒等待超时，尚未进入旧通知操作；保留原时限及失败 |
+| r8-wsl-startup-probe | 6 passed / 13 deselected，6.22s | 原 6 个旧通知参数用例附等待耗时及超时线程栈诊断，未复现；没有据此认定根因，随后串行重跑全量 |
+
+最后一次中间启动超时发生时，另有 Windows 新增用例专项运行；这只是并发负载背景，尚不足以证明因果或宣称已经修复。诊断没有修改业务源码、放宽超时、增加 skip 或删除断言。若复审再遇启动慢，需要保留线程栈进一步定位。诊断脚本提前导入 fixture 带来的 1 条 `PytestAssertRewriteWarning` 仅属于该次探针。
+
+通知导航仍使用 Qt 6.8 的 `QApplication.setActiveWindow` 兼容调用，完整 GUI 回归会报告 6 条弃用警告；这与实际可见/可操作断言分别记录。升级 Qt 前应验证替代激活 API，不能直接去掉激活而恢复隐藏卡片问题。
+
+### Windows 可见验收与截图边界
+
+实际启动了隔离 R7 fake 演示的当前 R8-A 窗口，Windows 窗口枚举识别到“DeskMate 桌伴”。原生屏幕采集第一次超时，重新枚举并选择窗口后重试仍为 `window capture timed out`，故停止原生 UI 操作，不能记作八步可见验收通过。仅关闭了本轮创建的隔离演示进程；没有操作用户的已有窗口。日志为 `.r1-verification/r8-visible-launch*.log` / `r8-visible-error*.log`。
+
+完成了真实 Qt 控件的离屏截图及模型/SQLite 驱动的自动化布局验证。Windows offscreen 初始字体库为空，截图为方框；主题层在该场景加载本机已有微软雅黑字体后中文正常，没有下载字体或依赖在线素材。
+
+截图保存在 Git 忽略的 `.r1-verification/r8-captures/`，共 **18 张 PNG**：对话、任务、待确认记忆、通知、设置、任务编辑，各有 1280×720 / scale 1、1024×576 / scale 1.25、853×480 / scale 1.5 三版；后两者是逻辑尺寸，实际 PNG 按缩放扩大。五种逻辑窗口的自动化几何验证还覆盖 1366×768 和 1920×1080。截图使用假资料，设置路径替换为演示路径，日志与数据库不提交。
+
+复现截图命令和八步原生验收见 [R8-A 使用与验收指南](deskmate-ux-guide.md)。`QT_SCALE_FACTOR` 离屏模拟不等于 Windows 系统缩放人工验收。当前证据分层为：**自动化结果按上表记录；Windows 八步可见交互待用户复审；原生 125%/150%、多屏、托盘气泡、字体大小和视觉舒适度待人工评价。** 不提前进入 R8-B 打包分发。
 
 以下为 LikeCC 0.2.0 在 2026-09-22 完成的发布验证。测试使用本地 fake 模型、临时文件和临时 Git 仓库；不需要模型 API Key。
 

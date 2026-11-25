@@ -131,7 +131,8 @@ def test_gui_permission_question_hidden_resume_and_no_duplicate_execution(qtapp,
         spin(lambda: c.snapshot()["state"] == "idle")
         w.refresh()
         assert "<img src=" in w.transcript.toPlainText()
-        assert "<b>literal</b>" in w.transcript.toPlainText()
+        # Tool results now live in the expandable audit view, still literal.
+        assert "<b>literal</b>" in w.technical.toPlainText()
         assert sum("离线演示完成" in r["text"] for r in c.snapshot()["rows"]) == 1
         session = c.snapshot()["session_id"]
         w.new_button.click()

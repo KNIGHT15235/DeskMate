@@ -3,10 +3,10 @@ import json
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
-    QPushButton, QPlainTextEdit)
+    QPushButton, QPlainTextEdit, QWidget)
 
 from likecc.memory.workspace import KINDS
-from .schedules import text_label
+from .widgets import Page, ChoiceList, Disclosure, text_label
 
 
 def update_text(widget, text):
@@ -15,9 +15,9 @@ def update_text(widget, text):
         widget.setPlainText(text)
 
 
-class MemoryWindow(QDialog):
-    def __init__(self, controller, submit, parent=None):
-        super().__init__(parent)
+class MemoryWindow(Page):
+    def __init__(self, controller, submit, parent=None, *, embedded=False):
+        super().__init__(parent, embedded=embedded)
         self.controller, self.submit_command = controller, submit
         self.setWindowTitle("DeskMate · 工作区记忆与来源")
         self.resize(900, 720)
@@ -26,15 +26,14 @@ class MemoryWindow(QDialog):
         self._proposal = None
         self._source_session = None
         self._workspace = None
-        layout = QVBoxLayout(self)
+        layout = self.body_layout
+        layout.addWidget(text_label("记忆", "heading"))
         self.notice = text_label("仅已确认内容参与召回。删除不抹去会话和运行审计；记忆不授予读写权限。")
         layout.addWidget(self.notice)
         self.used = QPlainTextEdit()
         self.used.setReadOnly(True)
         self.used.setMaximumHeight(115)
-        layout.addWidget(text_label("本次使用的记忆、版本、命中词与来源"))
-        layout.addWidget(self.used)
-        self.listing = QComboBox()
+        self.listing = ChoiceList(["桌伴记住了什么", "类型", "状态"])
         layout.addWidget(self.listing)
         self.listing.currentIndexChanged.connect(self.load_selected)
         self.kind = QComboBox()
@@ -45,6 +44,8 @@ class MemoryWindow(QDialog):
         self.content.setPlaceholderText("填写需要保存的具体偏好或项目事实（最多 1000 字符）")
         self.content.setMaximumHeight(130)
         layout.addWidget(self.content)
+        self.source_summary = text_label("尚无记忆。填写偏好后列为待确认，再核对保存。", "muted")
+        layout.addWidget(self.source_summary)
         row = QHBoxLayout()
         self.new = QPushButton("新内容")
         self.propose = QPushButton("列为待确认")
@@ -52,9 +53,15 @@ class MemoryWindow(QDialog):
         self.confirm = QPushButton("确认保存")
         self.update = QPushButton("保存修改")
         self.delete = QPushButton("删除所选记忆")
-        for button in (self.new, self.propose, self.link_run, self.confirm, self.update, self.delete):
+        for button in (self.new, self.propose, self.link_run):
             row.addWidget(button)
         layout.addLayout(row)
+        changes = QHBoxLayout()
+        for button in (self.confirm, self.update, self.delete):
+            changes.addWidget(button)
+        self.confirm.setProperty("primary", True)
+        self.delete.setProperty("danger", True)
+        layout.addLayout(changes)
         self.new.clicked.connect(self.clear_form)
         self.propose.clicked.connect(lambda: self.propose_content(False))
         self.link_run.clicked.connect(lambda: self.propose_content(True))
@@ -63,11 +70,20 @@ class MemoryWindow(QDialog):
         self.delete.clicked.connect(lambda: self.change("memory_delete"))
         self.source = QPlainTextEdit()
         self.source.setReadOnly(True)
-        layout.addWidget(text_label("来源记录（历史快照；不会打开文件、网页或运行工具）"))
-        layout.addWidget(self.source, 1)
+        self.source.setMinimumHeight(190)
+        provenance = QWidget()
+        provenance_layout = QVBoxLayout(provenance)
+        provenance_layout.setContentsMargins(0, 0, 0, 0)
+        provenance_layout.addWidget(text_label("来源记录与修改审计（历史快照）"))
+        provenance_layout.addWidget(self.source)
+        provenance_layout.addWidget(text_label("本次实际召回"))
+        provenance_layout.addWidget(self.used)
+        self.technical_panel = Disclosure("查看来源会话、相关资料与审计", provenance)
+        layout.addWidget(self.technical_panel)
         self.resume = QPushButton("查看来源会话（仅恢复历史）")
         self.resume.clicked.connect(lambda: self.submit_command("resume", session_id=self._source_session))
         layout.addWidget(self.resume)
+        layout.addStretch()
         self.timer = QTimer(self)
         self.timer.setInterval(150)
         self.timer.timeout.connect(self.refresh)
@@ -80,6 +96,8 @@ class MemoryWindow(QDialog):
         self.source.clear()
         self.kind.setCurrentIndex(0)
         self._source_session = None
+        self._selection = None
+        self.source_summary.setText("新内容需要你确认保存后，才会在后续对话使用。")
 
     def propose_content(self, from_run):
         self.submit_command("memory_propose", content=self.content.toPlainText(),
@@ -101,6 +119,10 @@ class MemoryWindow(QDialog):
             self.kind.setCurrentIndex(self.kind.findData(row["kind"]))
             self.content.setPlainText(row["content"])
             self.submit_command("memory_view", memory_id=row["id"])
+            self.source_summary.setText("正在读取来源摘要…")
+        else:
+            self.content.clear()
+            self.source_summary.setText("尚无所选记忆。可以新增偏好或项目事实。")
 
     def refresh(self):
         state = self.controller.snapshot()
@@ -119,7 +141,7 @@ class MemoryWindow(QDialog):
             self.listing.clear()
             for row in rows:
                 status = "待确认" if row["status"] == "pending" else "已确认"
-                self.listing.addItem(f"{status} · {KINDS[row['kind']]} · {row['content'][:65]}", row["id"])
+                self.listing.addItem([row['content'], KINDS[row['kind']], status], row["id"])
             self.listing.setCurrentIndex(max(0, self.listing.findData(selected)))
             self.listing.blockSignals(False)
             current = next((r for r in rows if r["id"] == self.listing.currentData()), None)
@@ -131,6 +153,9 @@ class MemoryWindow(QDialog):
         if details and self._selection == (details["memory"]["id"], details["memory"]["revision"]):
             update_text(self.source, json.dumps(details, ensure_ascii=False, indent=2))
             self._source_session = details["source"]["session_id"]
+            source = details["source"]
+            self.source_summary.setText("来源：" + (source.get("quote") or "本次资料运行")[:220] +
+                "\n" + ("待确认 · 尚未用于召回" if details["memory"]["status"] == "pending" else "已确认 · 可修改或删除"))
         idle = state["state"] == "idle"
         row = next((r for r in rows if r["id"] == self.listing.currentData()), None)
         self.confirm.setEnabled(bool(idle and row and row["status"] == "pending"))

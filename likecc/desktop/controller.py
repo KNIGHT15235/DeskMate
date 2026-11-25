@@ -62,7 +62,7 @@ class DesktopController:
                       "memories": [], "memory_details": None, "memory_proposal": None,
                       "recalled_memories": [], "memory_source_available": False}
         self._view.update(notifications=[], notification_settings={}, notification_due=False,
-                          notification_target=None, notification_alert=None)
+                          notification_target=None, notification_alert=None, artifact_preview=None)
         self._loop = None
         self._close_requested = threading.Event()
         self._shutdown_error = None
@@ -257,7 +257,7 @@ class DesktopController:
                   tasks=[], executions=[], schedule_draft=None, scheduler_error="", memories=[],
                   memory_details=None, memory_proposal=None, recalled_memories=[], memory_source_available=False,
                   notifications=[], notification_settings={}, notification_due=False,
-                  notification_target=None, notification_alert=None)
+                  notification_target=None, notification_alert=None, artifact_preview=None)
         self._schedule_draft = None
         released = False
         try:
@@ -331,7 +331,11 @@ class DesktopController:
     async def _dispatch(self, command_id, command, data):
         accepted, message = True, "已接受"
         try:
-            state = self.snapshot()["state"]
+            view = self.snapshot()
+            state = view["state"]
+            if (command in {"send", "new", "resume"} or command.startswith(("schedule_", "memory_"))):
+                if "workspace" in data and data["workspace"] != view["workspace"]:
+                    raise ValueError("工作区已变化，请刷新后重新操作")
             if command == "close":
                 self._closing = True
                 self._set(state="closing", pending=[])
@@ -373,6 +377,24 @@ class DesktopController:
                     self._set(scheduler_error=f"回复已保存，通知刷新失败：{type(exc).__name__}: {exc}")
             elif command.startswith("notification_"):
                 await self._notification_command(command, data)
+            elif command == "artifact_preview":
+                snapshot = self.snapshot()
+                workspace = data.get("workspace")
+                if not workspace or snapshot["workspace"] != workspace or state in {"starting", "error", "closing", "closed"}:
+                    raise ValueError("工作区已变化，请重新选择成果")
+                artifacts = (snapshot.get("materials") or {}).get("artifacts", [])
+                artifacts += [a for e in snapshot["executions"] for a in e["evidence"].get("artifacts", [])]
+                result = {"token": command_id, "workspace": workspace}
+                try:
+                    if data.get("path") not in {a["path"] for a in artifacts}:
+                        raise ValueError("该路径不是当前工作区记录的成果")
+                    from .artifacts import read_artifact
+                    result["text"] = await asyncio.to_thread(read_artifact, workspace, data["path"])
+                except (OSError, ValueError) as exc:
+                    result["text"] = "无法预览：" + str(exc)
+                    accepted, message = False, str(exc)
+                if self.snapshot()["workspace"] == workspace:
+                    self._set(artifact_preview=result)
             elif command.startswith("schedule_"):
                 await self._schedule_command(command, data)
             elif command.startswith("memory_"):
@@ -571,7 +593,7 @@ class DesktopController:
                 raise ValueError("未知通知命令")
         self._schedule_view()
 
-    def _prepare_schedule(self, spec, *, task_id=None, revision=None):
+    def _prepare_schedule(self, spec, *, task_id=None, revision=None, preview_id=None):
         if not self._store or not self._runtime:
             raise RuntimeError("请先打开工作区")
         if spec.kind == "execute" and self._options.demo:
@@ -579,16 +601,23 @@ class DesktopController:
         spec.provider = self._provider_identity() if spec.kind == "execute" else ""
         spec = spec.validated(self._store.workspace)
         self._schedule_draft = {"token": uuid.uuid4().hex, "spec": asdict(spec),
-            "workspace": self._store.workspace, "task_id": task_id, "revision": revision}
+            "workspace": self._store.workspace, "task_id": task_id, "revision": revision,
+            "preview_id": preview_id}
         self._set(schedule_draft=deepcopy(self._schedule_draft))
 
     async def _schedule_command(self, command, data):
-        if not self._store:
-            raise RuntimeError("调度器未就绪")
+        view = self.snapshot()
+        if (not self._store or view["workspace"] != self._store.workspace
+                or view["state"] in {"starting", "closing", "closed"}
+                or (view["state"] == "error" and command != "schedule_scan")):
+            raise RuntimeError("工作区切换中或调度器未就绪，请稍后重新操作")
+        # In an error state, scan still publishes existing diagnostic evidence;
+        # _tick_schedules itself refuses to dispatch work until recovery.
         if command == "schedule_preview":
             spec = TaskSpec(**data["spec"]) if "spec" in data else parse_schedule(
                 data["text"], now=self._clock(), timezone_name=data.get("timezone", "Asia/Shanghai"))
-            self._prepare_schedule(spec, task_id=data.get("task_id"), revision=data.get("revision"))
+            self._prepare_schedule(spec, task_id=data.get("task_id"), revision=data.get("revision"),
+                                   preview_id=data.get("preview_id"))
         elif command == "schedule_confirm":
             draft = self._schedule_draft
             if not draft or draft["token"] != data["token"]:

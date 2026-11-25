@@ -63,12 +63,16 @@ def test_review_switch_refresh_retry_and_outstanding(qtapp, desktop, tmp_path):
         assert old["status"] == "interrupted" and old["reviewed_at"]
         assert old["label"] == "已中断，已核对"
         w.refresh()
-        assert "0 项待处理/确认" in w.task_button.text()
+        # The compact navigation omits a zero badge; the accessible description
+        # and tooltip still expose the exact outstanding count to the user.
+        assert w.task_button.accessibleDescription() == "0 项待处理/确认"
+        assert w.task_button.toolTip() == "0 项待处理/确认"
         # The next real occurrence still needs its model decision.
         clock.advance(days=7)
         command(c, "schedule_scan")
         w.refresh()
-        assert "1 项待处理/确认" in w.task_button.text()
+        assert w.task_button.accessibleDescription() == "1 项待处理/确认"
+        assert "1 待处理" in w.task_button.text()
     finally:
         w.timer.stop()
         manager.timer.stop()

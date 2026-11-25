@@ -1,5 +1,7 @@
 # DeskMate（桌伴）
 
+R8-A 已把桌面入口整理为**对话、任务、记忆、通知、设置**五个页面，支持简明任务列表、来源摘要、通知筛选及 Markdown 成果只读预览。权限确认与原业务核心保持，Windows 安装包属于尚未开始的 R8-B。[当前桌面指南与离线验收](docs/deskmate-ux-guide.md) · [本轮验证记录](docs/verification.md)。
+
 DeskMate（桌伴）是一个 Python 桌面助手实验项目，支持资料整理、个人提醒、持久任务、执行历史、可管理的工作区记忆及事件驱动通知，并保留终端编程助手入口。通知中心支持继续处理、稍后提醒和免打扰。
 
 项目从 [LikeCC](https://github.com/KNIGHT15235/likecc) 0.2.0 演进而来，保留原 MIT 许可证和完整开发历史：[初始基线](https://github.com/KNIGHT15235/likecc/commit/4a9b77d281646385bf48fd85b8a03c4d28bbee23)、[R4 基线](https://github.com/KNIGHT15235/likecc/commit/0d76f22d729c781bf4a6f584b0f16f8ab0d73f4a)。当前独立仓库为 [KNIGHT15235/DeskMate](https://github.com/KNIGHT15235/DeskMate)，默认开发分支为 `main`；历史文档中的原仓库固定提交链接继续保留。

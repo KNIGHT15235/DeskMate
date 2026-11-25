@@ -404,6 +404,9 @@ def test_cancel_occurrence_and_stop_period_have_distinct_effects(journey, output
         assert not center.snooze_button.isEnabled()
     assert center.stop_button.isEnabled()
     center.stop_button.click()
+    assert c.snapshot()["tasks"][0]["enabled"]
+    assert center.confirmation is not None
+    next(b for b in center.confirmation.buttons() if b.text() == "停止整个安排").click()
     spin(lambda: not c.snapshot()["tasks"][0]["enabled"])
     assert c.snapshot()["tasks"][0]["id"] == task["id"]
     assert all(e["status"] == "cancelled" for e in c.snapshot()["executions"])
